@@ -14,7 +14,7 @@ const TARGETS = {
   DOKSAN: '-4786506925',
   JONGNO1: '-4787323606',
   JONGNO2: '-4698985829',
-  JONGNO3: '-1002996545753', // 종로3차 (확인값)
+  JONGNO3: '-1002996545753', // 종로3차
   DOGOK: '-1002723031579',
   JONGNO_DEPOSIT: '-4940765825',
 };
@@ -24,11 +24,12 @@ const TARGET_TITLES = {};
 TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
 TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
 TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
-TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';            // 독산동 계약서 관리비 확인방
+TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';
 TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
 // TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 필요 시 사용
 
-const SEND_MODE = (process.env.SEND_MODE || 'copy').toLowerCase();
+// copy 모드 고정(한 메시지에 타이틀+본문)
+const SEND_MODE = 'copy';
 
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
 function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
@@ -46,7 +47,7 @@ const ADDITIVE_RULES = [
   { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
 ];
 
-// “입금” 포함 AND “출금” 미포함일 때만 전달 (공백 제거 후 판별)
+// “입금” 포함 AND “출금” 미포함(공백 제거 후 판별)
 function shouldForward(text){
   const t = (text || '').replace(/\s+/g, '');
   const hasDeposit = /입금/.test(t);
@@ -135,11 +136,7 @@ function formatMessage(raw){
 }
 
 function matchTargets(text){
-  const can = shouldForward(text);
-  if (!can) {
-    console.log('skip: deposit filter not passed');
-    return [];
-  }
+  if (!shouldForward(text)) return [];
   const norm = normalize(text);
   const result = new Set();
 
@@ -148,25 +145,19 @@ function matchTargets(text){
   for (const r of EXCLUSIVE_RULES) {
     if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
   }
-  if (exclusiveHit) {
-    console.log('rule: exclusive hit ->', [...result]);
-    return [...result];
-  }
+  if (exclusiveHit) return [...result];
 
   // 누적 규칙
   for (const r of ADDITIVE_RULES) {
     if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
   }
-  const out = [...result];
-  if (out.length === 0) console.log('rule: no match');
-  else console.log('rule: additive hit ->', out);
-  return out;
+  return [...result];
 }
 
 const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
 
 // 대상 방 엔티티 미리 resolve
-const RESOLVED = {}; // chatId(string) -> entity
+const RESOLVED = {};
 async function resolveAllTargets(){
   const ids = Object.values(TARGETS).map(String);
   for (const id of ids) {
@@ -184,39 +175,18 @@ function toPeer(id){ return RESOLVED[String(id)] || id; }
 
 async function sendToTargets(messageEntity, content, targets){
   console.log('route targets:', targets);
-
-  // 타겟마다 타이틀 붙여서 전송
-  if (SEND_MODE === 'forward') {
-    const results = await Promise.allSettled(
-      targets.map(async (id) => {
-        const title = TARGET_TITLES[String(id)];
-        if (title) {
-          await client.sendMessage(toPeer(id), { message: title });
-        }
-        return client.forwardMessages(toPeer(id), {
-          messages: [messageEntity.id],
-          fromPeer: SOURCE_CHAT_ID,
-          dropAuthor: false,
-        });
-      })
-    );
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') console.error('forward fail:', targets[i], r.reason?.message || r.reason);
-      else console.log('forward ok:', targets[i]);
-    });
-  } else {
-    const results = await Promise.allSettled(
-      targets.map((id) => {
-        const title = TARGET_TITLES[String(id)];
-        const body = title ? `${title}\n${content}` : content;
-        return client.sendMessage(toPeer(id), { message: body });
-      })
-    );
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
-      else console.log('send ok:', targets[i]);
-    });
-  }
+  // copy 모드: 타이틀 + 본문 한 메시지로 전송
+  const results = await Promise.allSettled(
+    targets.map((id) => {
+      const title = TARGET_TITLES[String(id)];
+      const body = title ? `${title}\n${content}` : content;
+      return client.sendMessage(toPeer(id), { message: body });
+    })
+  );
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
+    else console.log('send ok:', targets[i]);
+  });
 }
 
 async function startUserbot(){
