@@ -24,29 +24,34 @@ const SEND_MODE = (process.env.SEND_MODE || 'copy').toLowerCase();
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
 function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
 
+// 배타 규칙
 const EXCLUSIVE_RULES = [
   { keywords: ['박*영(2982)'], targets: [TARGETS.DOKSAN] },
   { keywords: ['문*영(6825)'], targets: [TARGETS.DOGOK] },
 ];
 
+// 누적 규칙
 const ADDITIVE_RULES = [
   { keywords: ['문*영(8885)'],     targets: [TARGETS.JONGNO3, TARGETS.JONGNO_DEPOSIT] },
   { keywords: ['110-***-038170'], targets: [TARGETS.JONGNO1, TARGETS.JONGNO_DEPOSIT] },
   { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
 ];
 
+// “입금” 포함 AND “출금” 미포함일 때만 전달
 function shouldForward(text){
   const hasDeposit = /입금/.test(text);
   const hasWithdraw = /출금/.test(text);
   return hasDeposit && !hasWithdraw;
 }
 
+// 표시용 가공
 function formatMessage(raw){
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-  const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
+  // 계좌/발신/라벨 제거(표시용)
+  const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s); // 마스킹 또는 6자리 이상 숫자
   const drop = (s) =>
-    /^\d{7,}$/.test(s) ||
+    /^\d{7,}$/.test(s) ||                // 긴 발신번호
     /^\[?Web발신\]?$/i.test(s) ||
     /^보낸사람\s*:/.test(s) ||
     /^\[?카카오뱅크\]?$/i.test(s) ||
@@ -63,11 +68,13 @@ function formatMessage(raw){
   const depositLine = cleaned.find(s => /입금/.test(s));
   const depositIdx = depositLine ? cleaned.indexOf(depositLine) : -1;
 
+  // 이름/호수 후보
   const looksLikeNameLoose = (s) => /[가-힣]{2,}/.test(s) && !/\d/.test(s) && !/입금/.test(s);
   const nameLike = (s) => /\(.+\)/.test(s) || /(호|차)/.test(s) || looksLikeNameLoose(s);
   const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
   const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
 
+  // 금액 라인(입금 다음 숫자/금액)
   let amountLine = null;
   if (depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
@@ -79,10 +86,12 @@ function formatMessage(raw){
     }
   }
 
+  // 보조정보(호/차 등)
   let extraLine = null;
   for (const s of cleaned) {
     if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
   }
+  // 카카오: 입금 다음 첫 유의미 라인(이름/호수 등) 보강
   if (isKakao && !extraLine && depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
       const s = cleaned[i];
@@ -93,11 +102,13 @@ function formatMessage(raw){
 
   const out = [];
   if (isKakao) {
+    // 이름 → 일시 → 입금 → (있으면) 보조
     if (nameLine) out.push(nameLine);
     if (dateOnlyLine) out.push(dateOnlyLine);
     if (depositLine) out.push(depositLine);
     if (extraLine && extraLine !== nameLine) out.push(extraLine);
   } else {
+    // 비카카오: 이름이 입금보다 위이면 이름을 먼저
     if (nameIdx >= 0 && (depositIdx < 0 || nameIdx < depositIdx)) {
       if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
       if (nameLine) out.push(nameLine);
@@ -134,7 +145,7 @@ function matchTargets(text){
 
 const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
 
-// 1) 대상 방 엔티티 미리 resolve 해서 진단 로그 남김
+// 대상 방 엔티티 미리 resolve
 const RESOLVED = {}; // chatId(string) -> entity
 async function resolveAllTargets(){
   const ids = Object.values(TARGETS).map(String);
@@ -181,8 +192,24 @@ async function startUserbot(){
 
   await client.connect();
   console.log('Userbot connected.');
-  await resolveAllTargets(); // 시작 시 타겟 진단
+  await resolveAllTargets();
 
+  // /probe: 아무 방에서나 chat_id 확인
+  client.addEventHandler(async (event) => {
+    try {
+      const text = event?.message?.message?.trim();
+      if (!text || !/^\/probe\b/i.test(text)) return;
+      const chatId = (event.chatId && event.chatId.toString()) || '';
+      const chat = await event.getChat();
+      const title = chat?.title || chat?.username || '';
+      console.log('PROBE chat id:', chatId, title);
+      await client.sendMessage(event.chatId, { message: `chat_id: ${chatId}\n${title}` });
+    } catch (e) {
+      console.error('probe error:', e.message);
+    }
+  }, new NewMessage({}));
+
+  // 메인 라우팅
   client.addEventHandler(async (event) => {
     try {
       const chatId = (event.chatId && event.chatId.toString()) || '';
