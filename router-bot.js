@@ -2,39 +2,34 @@
 'use strict';
 
 /**
- * Telegram Webhook 버전(무의존, 단일파일)
- * - Render(Web Service) 배포용: 포트 리슨 + 웹훅 자동 설정
- * - 같은 토큰으로 다른 인스턴스(폴링/웹훅)가 돌면 409 발생 → 반드시 한 곳만 실행
- * - Render에서 Start Command: node todo-bot-proxy.js
+ * 문자 → 서버(/sms) → 규칙 라우팅 → 각 타겟 방 전송 (+옵션: 소스방에도 기록)
+ * - Render Web Service 배포용 (포트 리슨)
+ * - Start Command: node todo-bot-proxy.js
  */
 
 const http = require('http');
 const https = require('https');
-const { URL } = require('url');
 
-// 1) 토큰/방 ID (요청하신 단일파일 구성)
+// 1) 설정
 const TELEGRAM_BOT_TOKEN = '8256150140:AAEE6OKmkTfJD_Li-41CP6UmKrMOMTE6Qnc'.trim();
 
-// 소스(문자 수집) 방: "자동메세지 시스템"
+// 소스(로그용) 방: "자동메세지 시스템" (선택)
 const SOURCE_CHAT_ID = -1002552721308;
 
 // 타겟 방들
 const TARGETS = {
-	// 독산동 계약서 관리비 확인방
-	DOKSAN: -4786506925,
-	// 종로1차
-	JONGNO1: -4787323606,
-	// 종로2차
-	JONGNO2: -4698985829,
-	// 종로3차
-	JONGNO3: -4651498378,
-	// 도곡동입금관리비방
-	DOGOK: -1002723031579,
-	// 종로 입금확인방
-	JONGNO_DEPOSIT: -4940765825,
+	DOKSAN: -4786506925,        // 독산동 계약서 관리비 확인방
+	JONGNO1: -4787323606,       // 종로1차
+	JONGNO2: -4698985829,       // 종로2차
+	JONGNO3: -4651498378,       // 종로3차
+	DOGOK: -1002723031579,      // 도곡동입금관리비방
+	JONGNO_DEPOSIT: -4940765825 // 종로 입금확인방
 };
 
-// 라우팅 규칙
+// 보안 토큰(임의 값으로 바꿔서 사용). 요청 시 ?secret= 또는 헤더 X-Secret 로 전달
+const SMS_SECRET = process.env.SMS_SECRET || 'change-me-please';
+
+// 2) 라우팅 규칙
 const RULES = [
 	// 은행 → 종로 입금확인방
 	{ target: TARGETS.JONGNO_DEPOSIT, keywords: ['KB', '국민', '국민은행'] },
@@ -48,9 +43,7 @@ const RULES = [
 	{ target: TARGETS.JONGNO3, keywords: ['종로3', '종로 3', '종로3차'] },
 ];
 
-// ──────────────────────────────────────────────────────────────
-// Telegram API
-// ──────────────────────────────────────────────────────────────
+// ───────────────────────── Telegram API
 function tg(method, params = {}) {
 	const query = new URLSearchParams();
 	for (const [k, v] of Object.entries(params)) query.append(k, String(v));
@@ -63,12 +56,7 @@ function tg(method, params = {}) {
 				let data = '';
 				res.on('data', (d) => (data += d));
 				res.on('end', () => {
-					try {
-						const json = JSON.parse(data);
-						resolve(json);
-					} catch (e) {
-						reject(e);
-					}
+					try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
 				});
 			}
 		);
@@ -77,6 +65,7 @@ function tg(method, params = {}) {
 	});
 }
 
+// ───────────────────────── 라우팅 로직
 function normalize(text) {
 	return (text || '').toString().trim().toLowerCase();
 }
@@ -91,77 +80,94 @@ function matchTargets(text) {
 	return [...out];
 }
 
-async function handleUpdate(update) {
-	try {
-		const msg = update && update.message;
-		if (!msg || !msg.text || !msg.chat) return;
+async function routeAndSend(incomingText) {
+	const targets = matchTargets(incomingText);
+	const header = '(자동메세지)';
+	const content = `자동전달 ${header}\n${incomingText}`;
 
-		// 소스 방 필터
-		if (SOURCE_CHAT_ID && msg.chat.id !== SOURCE_CHAT_ID) return;
+	// 1) 소스(로그) 방에도 남기고 싶다면
+	if (SOURCE_CHAT_ID) {
+		await tg('sendMessage', {
+			chat_id: SOURCE_CHAT_ID,
+			text: incomingText,
+			disable_web_page_preview: true
+		});
+	}
 
-		const targets = matchTargets(msg.text);
-		if (targets.length === 0) return;
-
-		const header = msg.chat.title ? `(${msg.chat.title})` : '';
-		const content = `자동전달 ${header}\n${msg.text}`;
-
+	// 2) 타겟들로 전달
+	if (targets.length > 0) {
 		await Promise.all(
 			targets.map((chatId) =>
 				tg('sendMessage', {
 					chat_id: chatId,
 					text: content,
-					disable_web_page_preview: true,
+					disable_web_page_preview: true
 				})
 			)
 		);
-	} catch (e) {
-		console.error('handleUpdate 에러:', e.message);
 	}
+	return { targets };
 }
 
-// ──────────────────────────────────────────────────────────────
-/**
- * 서버 + 웹훅 설정
- * - Render에서는 RENDER_EXTERNAL_URL 이 자동으로 주어짐
- * - 그 외 환경이면 PUBLIC_URL 환경변수로 외부 URL 지정
- */
+// ───────────────────────── HTTP 서버 (/sms)
 const PORT = Number(process.env.PORT || 10000);
-const BASE_URL =
-	process.env.RENDER_EXTERNAL_URL?.replace(/\/+$/, '') ||
-	process.env.PUBLIC_URL?.replace(/\/+$/, '');
-
-const WEBHOOK_PATH = `/webhook/${TELEGRAM_BOT_TOKEN}`;
-const WEBHOOK_URL = BASE_URL ? `${BASE_URL}${WEBHOOK_PATH}` : null;
 
 const server = http.createServer(async (req, res) => {
 	try {
-		if (req.method === 'GET' && req.url === '/healthz') {
+		// health
+		if (req.method === 'GET' && req.url.startsWith('/healthz')) {
 			res.writeHead(200, { 'Content-Type': 'text/plain' });
 			return res.end('ok');
 		}
 
-		// Telegram webhook
-		if (req.method === 'POST' && req.url === WEBHOOK_PATH) {
+		// 문자 수신 엔드포인트
+		if (req.url.startsWith('/sms')) {
+			// 인증
+			const url = new URL(req.url, `http://${req.headers.host}`);
+			const qSecret = url.searchParams.get('secret');
+			const hSecret = req.headers['x-secret'];
+			if (SMS_SECRET && !(qSecret === SMS_SECRET || hSecret === SMS_SECRET)) {
+				res.writeHead(401, { 'Content-Type': 'application/json' });
+				return res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+			}
+
 			let body = '';
 			req.on('data', (chunk) => {
 				body += chunk;
-				// 1MB 초과 방지
-				if (body.length > 1e6) req.destroy();
+				if (body.length > 1e6) req.destroy(); // 1MB 제한
 			});
-			req.on('end', () => {
-				res.writeHead(200, { 'Content-Type': 'text/plain' });
-				res.end('ok'); // 먼저 응답
+			req.on('end', async () => {
 				try {
-					const update = JSON.parse(body || '{}');
-					handleUpdate(update); // 비동기 처리
+					let text = '';
+					if (req.method === 'POST') {
+						if (req.headers['content-type']?.includes('application/json')) {
+							const json = JSON.parse(body || '{}');
+							text = json.text || json.body || json.message || '';
+						} else {
+							// 폼이나 텍스트도 지원
+							text = body.toString();
+						}
+					} else {
+						text = url.searchParams.get('text') || '';
+					}
+
+					if (!text.trim()) {
+						res.writeHead(400, { 'Content-Type': 'application/json' });
+						return res.end(JSON.stringify({ ok: false, error: 'empty text' }));
+					}
+
+					const result = await routeAndSend(text);
+					res.writeHead(200, { 'Content-Type': 'application/json' });
+					res.end(JSON.stringify({ ok: true, routed_to: result.targets }));
 				} catch (e) {
-					console.error('웹훅 JSON 파싱 실패:', e.message);
+					console.error('sms 처리 실패:', e.message);
+					res.writeHead(500, { 'Content-Type': 'application/json' });
+					res.end(JSON.stringify({ ok: false, error: 'server error' }));
 				}
 			});
 			return;
 		}
 
-		// 기타
 		res.writeHead(404, { 'Content-Type': 'text/plain' });
 		res.end('not found');
 	} catch (e) {
@@ -173,33 +179,6 @@ const server = http.createServer(async (req, res) => {
 	}
 });
 
-async function boot() {
-	try {
-		// 1) 웹훅 초기화(중복/폴링 충돌 방지)
-		await tg('deleteWebhook', { drop_pending_updates: true });
-
-		// 2) 웹훅 설정
-		if (!WEBHOOK_URL) {
-			console.warn('외부 URL을 알 수 없습니다. PUBLIC_URL 또는 RENDER_EXTERNAL_URL을 설정하세요.');
-		} else {
-			const set = await tg('setWebhook', { url: WEBHOOK_URL });
-			if (!set.ok) throw new Error(`setWebhook 실패: ${JSON.stringify(set)}`);
-			console.log('Webhook set to:', WEBHOOK_URL);
-		}
-
-		// 3) 서버 시작
-		server.listen(PORT, () => {
-			console.log('Server listening on', PORT);
-		});
-	} catch (e) {
-		console.error('부팅 실패:', e.message);
-		setTimeout(boot, 3000);
-	}
-}
-
-process.on('SIGINT', () => {
-	console.log('Shutting down…');
-	process.exit(0);
+server.listen(PORT, () => {
+	console.log('Server listening on', PORT);
 });
-
-boot();
