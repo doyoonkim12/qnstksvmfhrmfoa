@@ -26,10 +26,10 @@ TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
 TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
 TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';
 TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
-// TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 필요 시 사용
+// TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 고정 타이틀을 원하면 주석 해제
 
-// copy 모드 고정(한 메시지에 타이틀+본문)
-const SEND_MODE = 'copy';
+// copy 모드 기본
+const SEND_MODE = (process.env.SEND_MODE || 'copy').toLowerCase();
 
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
 function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
@@ -60,9 +60,9 @@ function formatMessage(raw){
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
   // 계좌/발신/라벨 제거(표시용)
-  const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s); // 마스킹 또는 6자리 이상 숫자
+  const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
   const drop = (s) =>
-    /^\d{7,}$/.test(s) ||                // 긴 발신번호
+    /^\d{7,}$/.test(s) ||
     /^\[?Web발신\]?$/i.test(s) ||
     /^보낸사람\s*:/.test(s) ||
     /^\[?카카오뱅크\]?$/i.test(s) ||
@@ -136,7 +136,11 @@ function formatMessage(raw){
 }
 
 function matchTargets(text){
-  if (!shouldForward(text)) return [];
+  const can = shouldForward(text);
+  if (!can) {
+    console.log('skip: deposit filter not passed');
+    return [];
+  }
   const norm = normalize(text);
   const result = new Set();
 
@@ -173,19 +177,58 @@ async function resolveAllTargets(){
 }
 function toPeer(id){ return RESOLVED[String(id)] || id; }
 
+// 여기만 변경: 종로1/2/3로 전송될 때 종로 입금확인방에도 같은 타이틀로 복사
+function calcOriginTitle(targets){
+  if (targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
+  if (targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
+  if (targets.includes(TARGETS.JONGNO3)) return TARGET_TITLES[TARGETS.JONGNO3];
+  return null;
+}
+
 async function sendToTargets(messageEntity, content, targets){
   console.log('route targets:', targets);
+
+  const originTitle = calcOriginTitle(targets);
+
   // copy 모드: 타이틀 + 본문 한 메시지로 전송
+  if (SEND_MODE === 'copy') {
+    const results = await Promise.allSettled(
+      targets.map((id) => {
+        // 종로 입금확인방에는 원본 방 타이틀(종로1/2/3)을 붙여서 복사
+        const title =
+          (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
+            ? originTitle
+            : TARGET_TITLES[String(id)];
+
+        const body = title ? `${title}\n${content}` : content;
+        return client.sendMessage(toPeer(id), { message: body });
+      })
+    );
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
+      else console.log('send ok:', targets[i]);
+    });
+    return;
+  }
+
+  // forward 모드(선택적으로 지원): 타이틀 한 줄 + 원문 포워드
   const results = await Promise.allSettled(
-    targets.map((id) => {
-      const title = TARGET_TITLES[String(id)];
-      const body = title ? `${title}\n${content}` : content;
-      return client.sendMessage(toPeer(id), { message: body });
+    targets.map(async (id) => {
+      const title =
+        (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
+          ? originTitle
+          : TARGET_TITLES[String(id)];
+      if (title) await client.sendMessage(toPeer(id), { message: title });
+      return client.forwardMessages(toPeer(id), {
+        messages: [messageEntity.id],
+        fromPeer: SOURCE_CHAT_ID,
+        dropAuthor: false,
+      });
     })
   );
   results.forEach((r, i) => {
-    if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
-    else console.log('send ok:', targets[i]);
+    if (r.status === 'rejected') console.error('forward fail:', targets[i], r.reason?.message || r.reason);
+    else console.log('forward ok:', targets[i]);
   });
 }
 
@@ -218,8 +261,6 @@ async function startUserbot(){
       const msg = event.message;
       const original = msg?.message || '';
 
-      console.log('recv:', { chatId, len: original.length, head: original.split('\n').slice(0,4).join(' | ') });
-
       if (chatId !== SOURCE_CHAT_ID) return;
       if (!msg || msg.isOut) return;
       if (!original.trim()) return;
@@ -228,9 +269,6 @@ async function startUserbot(){
       if (targets.length === 0) return;
 
       const content = formatMessage(original);
-      console.log('content:', content.split('\n').join(' | '));
-      if (!content.trim()) return;
-
       await sendToTargets(msg, content, targets);
     } catch (e) {
       console.error('forward error:', e.message);
