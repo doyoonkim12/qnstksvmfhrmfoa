@@ -45,9 +45,14 @@ function formatMessage(raw){
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
   // 계좌/발신/라벨 제거(표시용)
-  const isMaskedAccount = (s) => /^[0-9*-]+$/.test(s) || /^[0-9*-]+(?:-[0-9*-]+)+$/.test(s); // 877001**550, 110-***-038170
+  // - 별/대시 포함 라인(마스킹 계좌) 제거
+  // - 숫자만 6자리 이상(전화·계정류) 제거
+  // - 7자리 이상 순수 숫자(발신번호) 제거
+  const isMaskedAccount = (s) =>
+    /[*-]/.test(s) || /^\d{6,}$/.test(s);
+
   const drop = (s) =>
-    /^\d{7,}$/.test(s) ||                 // 발신번호
+    /^\d{7,}$/.test(s) ||                // 발신번호(긴 숫자)
     /^\[?Web발신\]?$/i.test(s) ||
     /^보낸사람\s*:/.test(s) ||
     /^\[?카카오뱅크\]?$/i.test(s) ||
@@ -64,16 +69,14 @@ function formatMessage(raw){
   const depositLine = cleaned.find(s => /입금/.test(s));
   const depositIdx = depositLine ? cleaned.indexOf(depositLine) : -1;
 
-  const looksLikeNameLoose = (s) =>
-    /[가-힣]{2,}/.test(s) && !/\d/.test(s) && !/입금/.test(s); // 숫자 없는 한글 이름(김도윤 등)
-
-  const nameLike = (s) =>
-    /\(.+\)/.test(s) || /(호|차)/.test(s) || looksLikeNameLoose(s);
+  // 이름 후보(괄호/호·차/숫자 없는 한글 2자+)
+  const looksLikeNameLoose = (s) => /[가-힣]{2,}/.test(s) && !/\d/.test(s) && !/입금/.test(s);
+  const nameLike = (s) => /\(.+\)/.test(s) || /(호|차)/.test(s) || looksLikeNameLoose(s);
 
   const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
   const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
 
-  // 금액 라인(입금 바로 다음 숫자/금액)
+  // 금액 라인(입금 다음 숫자/금액)
   let amountLine = null;
   if (depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
@@ -81,24 +84,22 @@ function formatMessage(raw){
       if (!s) continue;
       if (/입금/.test(s)) continue;
       if (/^[0-9][\d,]*원?$/.test(s)) { amountLine = s; break; }
-      // 카카오의 "입금 1,000,000원"은 depositLine에 이미 포함됨
-      break; // 첫 유의미 라인만 검사
+      // 다른 유의미 라인이면 중단
+      break;
     }
   }
 
   // 추가 한 줄(호/차 등)
   let extraLine = null;
   for (const s of cleaned) {
-    if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) {
-      extraLine = s; break;
-    }
+    if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
   }
   // 카카오: 입금 뒤 첫 유의미 라인 보강(이름/호수 등)
   if (isKakao && !extraLine && depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
       const s = cleaned[i];
       if (!s || s === nameLine || /입금/.test(s)) continue;
-      extraLine = s; break;
+      if (!/^[0-9][\d,]*원?$/.test(s)) { extraLine = s; break; } // 금액이 아니면 보조정보로
     }
   }
 
@@ -111,8 +112,8 @@ function formatMessage(raw){
     if (extraLine && extraLine !== nameLine) out.push(extraLine);
   } else {
     // 비카카오:
-    // ① 이름이 입금보다 위에 있으면: 날짜 → 이름 → 입금 → (있다면) 금액 → (있다면) 추가
-    // ② 아니면: 날짜 → 입금(혹은 입금+금액) → (있다면) 금액 → 이름/추가
+    // ① 이름이 입금보다 위: 날짜 → 이름 → 입금 → 금액(있으면) → 보조
+    // ② 그 외: 날짜 → 입금 → 금액(있으면) → 이름 → 보조
     if (nameIdx >= 0 && (depositIdx < 0 || nameIdx < depositIdx)) {
       if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
       if (nameLine) out.push(nameLine);
