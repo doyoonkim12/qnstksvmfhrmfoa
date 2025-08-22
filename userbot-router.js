@@ -26,10 +26,10 @@ TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
 TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
 TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';
 TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
-// TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 고정 타이틀을 원하면 주석 해제
+// TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 원하면 주석 해제
 
-// copy 모드 기본
-const SEND_MODE = (process.env.SEND_MODE || 'copy').toLowerCase();
+// copy 모드 강제(타이틀+본문 한 메시지)
+const SEND_MODE = 'copy';
 
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
 function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
@@ -136,11 +136,7 @@ function formatMessage(raw){
 }
 
 function matchTargets(text){
-  const can = shouldForward(text);
-  if (!can) {
-    console.log('skip: deposit filter not passed');
-    return [];
-  }
+  if (!shouldForward(text)) return [];
   const norm = normalize(text);
   const result = new Set();
 
@@ -177,7 +173,7 @@ async function resolveAllTargets(){
 }
 function toPeer(id){ return RESOLVED[String(id)] || id; }
 
-// 여기만 변경: 종로1/2/3로 전송될 때 종로 입금확인방에도 같은 타이틀로 복사
+// 종로1/2/3로 전송 시, 종로 입금확인방에도 같은 타이틀로 복사
 function calcOriginTitle(targets){
   if (targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
   if (targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
@@ -191,44 +187,19 @@ async function sendToTargets(messageEntity, content, targets){
   const originTitle = calcOriginTitle(targets);
 
   // copy 모드: 타이틀 + 본문 한 메시지로 전송
-  if (SEND_MODE === 'copy') {
-    const results = await Promise.allSettled(
-      targets.map((id) => {
-        // 종로 입금확인방에는 원본 방 타이틀(종로1/2/3)을 붙여서 복사
-        const title =
-          (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
-            ? originTitle
-            : TARGET_TITLES[String(id)];
-
-        const body = title ? `${title}\n${content}` : content;
-        return client.sendMessage(toPeer(id), { message: body });
-      })
-    );
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
-      else console.log('send ok:', targets[i]);
-    });
-    return;
-  }
-
-  // forward 모드(선택적으로 지원): 타이틀 한 줄 + 원문 포워드
   const results = await Promise.allSettled(
-    targets.map(async (id) => {
+    targets.map((id) => {
       const title =
         (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
           ? originTitle
           : TARGET_TITLES[String(id)];
-      if (title) await client.sendMessage(toPeer(id), { message: title });
-      return client.forwardMessages(toPeer(id), {
-        messages: [messageEntity.id],
-        fromPeer: SOURCE_CHAT_ID,
-        dropAuthor: false,
-      });
+      const body = title ? `${title}\n${content}` : content;
+      return client.sendMessage(toPeer(id), { message: body });
     })
   );
   results.forEach((r, i) => {
-    if (r.status === 'rejected') console.error('forward fail:', targets[i], r.reason?.message || r.reason);
-    else console.log('forward ok:', targets[i]);
+    if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
+    else console.log('send ok:', targets[i]);
   });
 }
 
