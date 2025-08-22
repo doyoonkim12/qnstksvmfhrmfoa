@@ -19,6 +19,15 @@ const TARGETS = {
   JONGNO_DEPOSIT: '-4940765825',
 };
 
+// 방별 상단 타이틀(없으면 본문만 전송)
+const TARGET_TITLES = {};
+TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
+TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
+TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
+TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';            // 독산동 계약서 관리비 확인방
+TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
+// TARGET_TITLES[TARGETS.JONGNO_DEPOSIT] = '종로 입금확인방'; // 필요 시 사용
+
 const SEND_MODE = (process.env.SEND_MODE || 'copy').toLowerCase();
 
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
@@ -175,13 +184,21 @@ function toPeer(id){ return RESOLVED[String(id)] || id; }
 
 async function sendToTargets(messageEntity, content, targets){
   console.log('route targets:', targets);
+
+  // 타겟마다 타이틀 붙여서 전송
   if (SEND_MODE === 'forward') {
     const results = await Promise.allSettled(
-      targets.map(id => client.forwardMessages(toPeer(id), {
-        messages: [messageEntity.id],
-        fromPeer: SOURCE_CHAT_ID,
-        dropAuthor: false,
-      }))
+      targets.map(async (id) => {
+        const title = TARGET_TITLES[String(id)];
+        if (title) {
+          await client.sendMessage(toPeer(id), { message: title });
+        }
+        return client.forwardMessages(toPeer(id), {
+          messages: [messageEntity.id],
+          fromPeer: SOURCE_CHAT_ID,
+          dropAuthor: false,
+        });
+      })
     );
     results.forEach((r, i) => {
       if (r.status === 'rejected') console.error('forward fail:', targets[i], r.reason?.message || r.reason);
@@ -189,7 +206,11 @@ async function sendToTargets(messageEntity, content, targets){
     });
   } else {
     const results = await Promise.allSettled(
-      targets.map(id => client.sendMessage(toPeer(id), { message: content }))
+      targets.map((id) => {
+        const title = TARGET_TITLES[String(id)];
+        const body = title ? `${title}\n${content}` : content;
+        return client.sendMessage(toPeer(id), { message: body });
+      })
     );
     results.forEach((r, i) => {
       if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
@@ -227,7 +248,6 @@ async function startUserbot(){
       const msg = event.message;
       const original = msg?.message || '';
 
-      // 원문 샘플/채널 로그
       console.log('recv:', { chatId, len: original.length, head: original.split('\n').slice(0,4).join(' | ') });
 
       if (chatId !== SOURCE_CHAT_ID) return;
