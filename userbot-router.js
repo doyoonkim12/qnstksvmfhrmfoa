@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const https = require('https'); // keepalive용
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
@@ -9,7 +10,10 @@ const API_ID = Number(process.env.API_ID || 0);
 const API_HASH = process.env.API_HASH || '';
 const SESSION = process.env.SESSION || '';
 
+// 소스(문자 수집) 방
 const SOURCE_CHAT_ID = '-1002552721308';
+
+// 타겟 방들
 const TARGETS = {
   DOKSAN: '-4786506925',
   JONGNO1: '-4787323606',
@@ -19,7 +23,7 @@ const TARGETS = {
   JONGNO_DEPOSIT: '-4940765825',
 };
 
-// 방별 상단 타이틀
+// 방별 타이틀(없으면 본문만 전송)
 const TARGET_TITLES = {};
 TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
 TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
@@ -29,6 +33,9 @@ TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
 
 // copy 모드 강제(타이틀+본문 한 메시지)
 const SEND_MODE = 'copy';
+
+// 무료 도메인(keepalive에 사용, 주소 고정)
+const BASE_URL = 'https://qnstksvmfhrmfoa.onrender.com';
 
 function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
 function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
@@ -54,10 +61,11 @@ function shouldForward(text){
   return hasDeposit && !hasWithdraw;
 }
 
-// 표시용 가공(전달용 본문)
+// 표시용 가공
 function formatMessage(raw){
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
+  // 계좌/발신/라벨 제거(표시용)
   const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
   const drop = (s) =>
     /^\d{7,}$/.test(s) ||
@@ -73,6 +81,7 @@ function formatMessage(raw){
 
   const bankDateLine = cleaned.find(s => dateRegex.test(s) && /신한|\[?kb\]?|국민|농협|우리|ibk|하나|기업/i.test(s));
   const dateOnlyLine = cleaned.find(s => dateRegex.test(s));
+
   const depositLine = cleaned.find(s => /입금/.test(s));
   const depositIdx = depositLine ? cleaned.indexOf(depositLine) : -1;
 
@@ -81,6 +90,7 @@ function formatMessage(raw){
   const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
   const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
 
+  // 금액 라인(입금 다음 숫자/금액)
   let amountLine = null;
   if (depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
@@ -92,10 +102,12 @@ function formatMessage(raw){
     }
   }
 
+  // 보조정보(호/차 등)
   let extraLine = null;
   for (const s of cleaned) {
     if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
   }
+  // 카카오: 입금 다음 첫 유의미 라인 보강
   if (isKakao && !extraLine && depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
       const s = cleaned[i];
@@ -129,32 +141,27 @@ function formatMessage(raw){
 }
 
 function matchTargets(text){
-  const can = shouldForward(text);
-  if (!can) { console.log('skip: deposit filter not passed'); return []; }
-
+  if (!shouldForward(text)) return [];
   const norm = normalize(text);
   const result = new Set();
 
-  // 배타
+  // 배타 규칙
   let exclusiveHit = false;
   for (const r of EXCLUSIVE_RULES) {
     if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
   }
-  if (exclusiveHit) { console.log('rule: exclusive hit ->', [...result]); return [...result]; }
+  if (exclusiveHit) return [...result];
 
-  // 누적
+  // 누적 규칙
   for (const r of ADDITIVE_RULES) {
     if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
   }
-  const out = [...result];
-  if (out.length === 0) console.log('rule: no match');
-  else console.log('rule: additive hit ->', out);
-  return out;
+  return [...result];
 }
 
 const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
 
-// resolve
+// 대상 방 엔티티 미리 resolve
 const RESOLVED = {};
 async function resolveAllTargets(){
   const ids = Object.values(TARGETS).map(String);
@@ -171,7 +178,7 @@ async function resolveAllTargets(){
 }
 function toPeer(id){ return RESOLVED[String(id)] || id; }
 
-// 종로1/2/3이면 종로입금확인방에도 같은 타이틀로 복사
+// 종로1/2/3이면 종로 입금확인방에도 같은 타이틀로 복사
 function calcOriginTitle(targets){
   if (targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
   if (targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
@@ -180,8 +187,6 @@ function calcOriginTitle(targets){
 }
 
 async function sendToTargets(messageEntity, content, targets){
-  console.log('route targets:', targets);
-
   const originTitle = calcOriginTitle(targets);
 
   const results = await Promise.allSettled(
@@ -205,7 +210,7 @@ async function startUserbot(){
   console.log('Userbot connected.');
   await resolveAllTargets();
 
-  // /probe
+  // /probe: 아무 방에서나 chat_id 확인
   client.addEventHandler(async (event) => {
     try {
       const text = event?.message?.message?.trim();
@@ -220,14 +225,12 @@ async function startUserbot(){
     }
   }, new NewMessage({}));
 
-  // 메인
+  // 메인 라우팅
   client.addEventHandler(async (event) => {
     try {
       const chatId = (event.chatId && event.chatId.toString()) || '';
       const msg = event.message;
       const original = msg?.message || '';
-
-      console.log('recv:', { chatId, len: original.length, head: original.split('\n').slice(0,4).join(' | ') });
 
       if (chatId !== SOURCE_CHAT_ID) return;
       if (!msg || msg.isOut) return;
@@ -237,9 +240,6 @@ async function startUserbot(){
       if (targets.length === 0) return;
 
       const content = formatMessage(original);
-      console.log('content:', content.split('\n').join(' | '));
-      if (!content.trim()) return;
-
       await sendToTargets(msg, content, targets);
     } catch (e) {
       console.error('forward error:', e.message);
@@ -249,6 +249,7 @@ async function startUserbot(){
   console.log('Listening on source chat:', SOURCE_CHAT_ID);
 }
 
+// healthz + keepalive
 const PORT = Number(process.env.PORT || 10000);
 const server = http.createServer((req, res) => {
   if (req.url === '/healthz') { res.writeHead(200, {'Content-Type':'text/plain'}); return res.end('ok'); }
@@ -258,7 +259,19 @@ const server = http.createServer((req, res) => {
 (async () => {
   try {
     await startUserbot();
-    server.listen(PORT, () => console.log('Health server on', PORT));
+    server.listen(PORT, () => {
+      console.log('Health server on', PORT);
+
+      // 24h 유지용 내부 keepalive (4분마다 /healthz 핑)
+      const KEEPALIVE_URL = `${BASE_URL}/healthz`;
+      console.log('keepalive to:', KEEPALIVE_URL);
+      const ping = () => {
+        https.get(KEEPALIVE_URL, (res) => res.resume())
+          .on('error', (e) => console.log('keepalive error:', e.message));
+      };
+      ping();
+      setInterval(ping, 4 * 60 * 1000);
+    });
   } catch (e) {
     console.error('startup error:', e.message);
     process.exit(1);
