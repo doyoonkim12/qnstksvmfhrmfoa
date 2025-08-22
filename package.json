@@ -1,10 +1,14 @@
 {
-  "name": "session-maker",
+  "name": "userbot-router",
   "version": "1.0.0",
-  "type": "module",
-  "scripts": { "start": "node login.js" },
+  "private": true,
+  "engines": { "node": ">=16" },
+  "scripts": {
+    "start": "node userbot-router.js",
+    "login": "node login-once.js"
+  },
   "dependencies": {
-    "telegram": "^2.21.11",
+    "telegram": "^2.20.0",
     "input": "^1.0.1"
   }
 }
