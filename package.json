@@ -1,13 +1,10 @@
 {
-  "name": "telegram-router",
+  "name": "session-maker",
   "version": "1.0.0",
-  "main": "router-bot.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node router-bot.js"
-  },
+  "type": "module",
+  "scripts": { "start": "node login.js" },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "node-telegram-bot-api": "^0.66.0"
+    "telegram": "^2.21.11",
+    "input": "^1.0.1"
   }
 }
