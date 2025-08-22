@@ -14,7 +14,7 @@ const TARGETS = {
   DOKSAN: '-4786506925',
   JONGNO1: '-4787323606',
   JONGNO2: '-4698985829',
-  JONGNO3: '-1002996545753',      // ← 종로3차 실제 chat_id 업데이트
+  JONGNO3: '-1002996545753', // 종로3차 (확인값)
   DOGOK: '-1002723031579',
   JONGNO_DEPOSIT: '-4940765825',
 };
@@ -37,10 +37,11 @@ const ADDITIVE_RULES = [
   { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
 ];
 
-// “입금” 포함 AND “출금” 미포함일 때만 전달
+// “입금” 포함 AND “출금” 미포함일 때만 전달 (공백 제거 후 판별)
 function shouldForward(text){
-  const hasDeposit = /입금/.test(text);
-  const hasWithdraw = /출금/.test(text);
+  const t = (text || '').replace(/\s+/g, '');
+  const hasDeposit = /입금/.test(t);
+  const hasWithdraw = /출금/.test(t);
   return hasDeposit && !hasWithdraw;
 }
 
@@ -91,7 +92,7 @@ function formatMessage(raw){
   for (const s of cleaned) {
     if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
   }
-  // 카카오: 입금 다음 첫 유의미 라인(이름/호수 등) 보강
+  // 카카오: 입금 다음 첫 유의미 라인 보강
   if (isKakao && !extraLine && depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
       const s = cleaned[i];
@@ -102,13 +103,11 @@ function formatMessage(raw){
 
   const out = [];
   if (isKakao) {
-    // 이름 → 일시 → 입금 → (있으면) 보조
     if (nameLine) out.push(nameLine);
     if (dateOnlyLine) out.push(dateOnlyLine);
     if (depositLine) out.push(depositLine);
     if (extraLine && extraLine !== nameLine) out.push(extraLine);
   } else {
-    // 비카카오: 이름이 입금보다 위이면 이름을 먼저
     if (nameIdx >= 0 && (depositIdx < 0 || nameIdx < depositIdx)) {
       if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
       if (nameLine) out.push(nameLine);
@@ -127,20 +126,32 @@ function formatMessage(raw){
 }
 
 function matchTargets(text){
-  if (!shouldForward(text)) return [];
+  const can = shouldForward(text);
+  if (!can) {
+    console.log('skip: deposit filter not passed');
+    return [];
+  }
   const norm = normalize(text);
   const result = new Set();
 
+  // 배타 규칙
   let exclusiveHit = false;
   for (const r of EXCLUSIVE_RULES) {
     if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
   }
-  if (exclusiveHit) return [...result];
+  if (exclusiveHit) {
+    console.log('rule: exclusive hit ->', [...result]);
+    return [...result];
+  }
 
+  // 누적 규칙
   for (const r of ADDITIVE_RULES) {
     if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
   }
-  return [...result];
+  const out = [...result];
+  if (out.length === 0) console.log('rule: no match');
+  else console.log('rule: additive hit ->', out);
+  return out;
 }
 
 const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
@@ -213,18 +224,21 @@ async function startUserbot(){
   client.addEventHandler(async (event) => {
     try {
       const chatId = (event.chatId && event.chatId.toString()) || '';
-      if (chatId !== SOURCE_CHAT_ID) return;
-
       const msg = event.message;
-      if (!msg || msg.isOut) return;
+      const original = msg?.message || '';
 
-      const original = msg.message || '';
+      // 원문 샘플/채널 로그
+      console.log('recv:', { chatId, len: original.length, head: original.split('\n').slice(0,4).join(' | ') });
+
+      if (chatId !== SOURCE_CHAT_ID) return;
+      if (!msg || msg.isOut) return;
       if (!original.trim()) return;
 
       const targets = matchTargets(original);
       if (targets.length === 0) return;
 
       const content = formatMessage(original);
+      console.log('content:', content.split('\n').join(' | '));
       if (!content.trim()) return;
 
       await sendToTargets(msg, content, targets);
