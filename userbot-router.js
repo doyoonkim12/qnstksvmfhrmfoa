@@ -11,7 +11,7 @@ const API_HASH = process.env.API_HASH || '';
 const SESSION = process.env.SESSION || '';
 
 // 소스(문자 수집) 방
-const SOURCE_CHAT_ID = '-1002552721308';
+const SOURCE_CHAT_ID = '-1002996545753';
 
 // 타겟 방들
 const TARGETS = {
