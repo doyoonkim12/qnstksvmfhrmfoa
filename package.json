@@ -1,8 +1,12 @@
 {
   "name": "userbot-router",
   "version": "1.0.0",
+  "description": "Telegram userbot proxy & router service for automated message forwarding.",
   "private": true,
-  "engines": { "node": ">=16" },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node userbot-router.js",
     "login": "node login-once.js"
