@@ -67,7 +67,6 @@ function shouldForward(text){
 function formatMessage(raw){
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-  // 계좌/발신/라벨 제거(표시용)
   const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
   const drop = (s) =>
     /^\d{7,}$/.test(s) ||
@@ -92,7 +91,6 @@ function formatMessage(raw){
   const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
   const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
 
-  // 금액 라인(입금 다음 숫자/금액)
   let amountLine = null;
   if (depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
@@ -104,12 +102,10 @@ function formatMessage(raw){
     }
   }
 
-  // 보조정보(호/차 등)
   let extraLine = null;
   for (const s of cleaned) {
     if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
   }
-  // 카카오: 입금 다음 첫 유의미 라인 보강
   if (isKakao && !extraLine && depositIdx >= 0) {
     for (let i = depositIdx + 1; i < cleaned.length; i++) {
       const s = cleaned[i];
@@ -147,14 +143,12 @@ function matchTargets(text){
   const norm = normalize(text);
   const result = new Set();
 
-  // 배타 규칙
   let exclusiveHit = false;
   for (const r of EXCLUSIVE_RULES) {
     if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
   }
   if (exclusiveHit) return [...result];
 
-  // 누적 규칙
   for (const r of ADDITIVE_RULES) {
     if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
   }
@@ -163,7 +157,6 @@ function matchTargets(text){
 
 const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
 
-// 대상 방 엔티티 미리 resolve
 const RESOLVED = {};
 async function resolveAllTargets(){
   const ids = Object.values(TARGETS).map(String);
@@ -180,7 +173,6 @@ async function resolveAllTargets(){
 }
 function toPeer(id){ return RESOLVED[String(id)] || id; }
 
-// 종로1/2/3이면 종로 입금확인방에도 같은 타이틀로 복사
 function calcOriginTitle(targets){
   if (TARGETS.JONGNO1 && targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
   if (TARGETS.JONGNO2 && targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
@@ -212,13 +204,12 @@ async function startUserbot(){
   console.log('Userbot connected.');
   await resolveAllTargets();
 
-  // /probe: 아무 방에서나 chat_id 확인
   client.addEventHandler(async (event) => {
     try {
       const text = event?.message?.message?.trim();
       if (!text || !/^\/probe\b/i.test(text)) return;
       const chatId = (event.chatId && event.chatId.toString()) || '';
-      the const chat = await event.getChat();
+      const chat = await event.getChat();
       const title = chat?.title || chat?.username || '';
       console.log('PROBE chat id:', chatId, title);
       await client.sendMessage(event.chatId, { message: `chat_id: ${chatId}\n${title}` });
@@ -227,7 +218,6 @@ async function startUserbot(){
     }
   }, new NewMessage({}));
 
-  // 메인 라우팅
   client.addEventHandler(async (event) => {
     try {
       const chatId = (event.chatId && event.chatId.toString()) || '';
@@ -251,7 +241,6 @@ async function startUserbot(){
   console.log('Listening on source chat:', SOURCE_CHAT_ID);
 }
 
-// healthz + keepalive
 const PORT = Number(process.env.PORT || 10000);
 const server = http.createServer((req, res) => {
   if (req.url === '/healthz') { res.writeHead(200, {'Content-Type':'text/plain'}); return res.end('ok'); }
@@ -264,7 +253,6 @@ const server = http.createServer((req, res) => {
     server.listen(PORT, () => {
       console.log('Health server on', PORT);
 
-      // 24h 유지용 내부 keepalive (4분마다 /healthz 핑)
       const KEEPALIVE_URL = `${BASE_URL}/healthz`;
       console.log('keepalive to:', KEEPALIVE_URL);
       const ping = () => {
