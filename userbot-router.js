@@ -17,6 +17,7 @@ const SOURCE_CHAT_ID = '-1002552721308';
 const TARGETS = {
   DOKSAN: '-4786506925',
   YONGSAN: '-5058405436',
+  JONGNO1: '-4787323606',
   JONGNO2: '-4698985829',
   JONGNO3: '-1002996545753', // 종로3차
   DOGOK: '-4958074272',
@@ -26,6 +27,7 @@ const TARGETS = {
 // 방별 타이틀(없으면 본문만 전송)
 const TARGET_TITLES = {};
 TARGET_TITLES[TARGETS.YONGSAN] = '용산입금방';
+TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
 TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
 TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
 TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';
@@ -49,7 +51,7 @@ const EXCLUSIVE_RULES = [
 // 누적 규칙
 const ADDITIVE_RULES = [
   { keywords: ['문*영(8885)'],     targets: [TARGETS.JONGNO3, TARGETS.JONGNO_DEPOSIT] },
-  { keywords: ['110-***-038170'], targets: [TARGETS.JONGNO1, TARGETS.JONGNO_DEPOSIT] },
+  { keywords: ['110-***-038170'], targets: [TARGETS.YONGSAN] },
   { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
 ];
 
@@ -180,9 +182,9 @@ function toPeer(id){ return RESOLVED[String(id)] || id; }
 
 // 종로1/2/3이면 종로 입금확인방에도 같은 타이틀로 복사
 function calcOriginTitle(targets){
-  if (targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
-  if (targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
-  if (targets.includes(TARGETS.JONGNO3)) return TARGET_TITLES[TARGETS.JONGNO3];
+  if (TARGETS.JONGNO1 && targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
+  if (TARGETS.JONGNO2 && targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
+  if (TARGETS.JONGNO3 && targets.includes(TARGETS.JONGNO3)) return TARGET_TITLES[TARGETS.JONGNO3];
   return null;
 }
 
@@ -216,7 +218,7 @@ async function startUserbot(){
       const text = event?.message?.message?.trim();
       if (!text || !/^\/probe\b/i.test(text)) return;
       const chatId = (event.chatId && event.chatId.toString()) || '';
-      const chat = await event.getChat();
+      the const chat = await event.getChat();
       const title = chat?.title || chat?.username || '';
       console.log('PROBE chat id:', chatId, title);
       await client.sendMessage(event.chatId, { message: `chat_id: ${chatId}\n${title}` });
