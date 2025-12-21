@@ -1,269 +1,267 @@
-'use strict';
+  const http = require('http');
+  const https = require('https');
+  const { TelegramClient } = require('telegram');
+  const { StringSession } = require('telegram/sessions');
+  const { NewMessage } = require('telegram/events');
 
-const http = require('http');
-const https = require('https'); // keepalive용
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
-const { NewMessage } = require('telegram/events');
+  const API_ID = Number(process.env.API_ID || 0);
+  const API_HASH = process.env.API_HASH || '';
+  const SESSION = process.env.SESSION || '';
 
-const API_ID = Number(process.env.API_ID || 0);
-const API_HASH = process.env.API_HASH || '';
-const SESSION = process.env.SESSION || '';
+  // 소스(문자 수집) 방
+  const SOURCE_CHAT_ID = '-1002552721308';
 
-// 소스(문자 수집) 방
-const SOURCE_CHAT_ID = '-1002552721308';
+  // 타겟 목록
+  const TARGETS = {
+    DOKSAN: '-4786506925',
+    YONGSAN: '-5058405436',
+    JONGNO1: '-4787323606',
+    JONGNO2: '-4698985829',
+    JONGNO3: '-1002996545753',
+    DOGOK: '-4958074272',
+    JONGNO_DEPOSIT: '-4940765825',
+  };
 
-// 타겟 방들
-const TARGETS = {
-  DOKSAN: '-4786506925',
-  YONGSAN: '-5058405436',
-  JONGNO1: '-4787323606',
-  JONGNO2: '-4698985829',
-  JONGNO3: '-1002996545753', // 종로3차
-  DOGOK: '-4958074272',
-  JONGNO_DEPOSIT: '-4940765825',
-};
+  // 방별 타이틀
+  const TARGET_TITLES = {};
+  TARGET_TITLES[TARGETS.YONGSAN] = '용산입금방';
+  TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
+  TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
+  TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
+  TARGET_TITLES[TARGETS.DOKSAN]  = '도산메리트';
+  TARGET_TITLES[TARGETS.DOGOK]   = '도곡';
 
-// 방별 타이틀(없으면 본문만 전송)
-const TARGET_TITLES = {};
-TARGET_TITLES[TARGETS.YONGSAN] = '용산입금방';
-TARGET_TITLES[TARGETS.JONGNO1] = '종로1차';
-TARGET_TITLES[TARGETS.JONGNO2] = '종로2차';
-TARGET_TITLES[TARGETS.JONGNO3] = '종로3차';
-TARGET_TITLES[TARGETS.DOKSAN]  = '월드메르디앙';
-TARGET_TITLES[TARGETS.DOGOK]   = '도곡동';
+  const SEND_MODE = 'copy';
 
-// copy 모드 강제(타이틀+본문 한 메시지)
-const SEND_MODE = 'copy';
+  const BASE_URL = 'https://qnstksvmfhrmfoa.onrender.com';
 
-// 무료 도메인(keepalive에 사용, 주소 고정)
-const BASE_URL = 'https://qnstksvmfhrmfoa.onrender.com';
+  function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
+  function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
 
-function normalize(s){ return (s||'').toString().trim().toLowerCase(); }
-function includesAny(norm, arr){ return arr.some(k => norm.includes(normalize(k))); }
+  // 배타 규칙
+  const EXCLUSIVE_RULES = [
+    { keywords: ['박*영(2982)'], targets: [TARGETS.DOKSAN] },
+    { keywords: ['문*영(6825)'], targets: [TARGETS.DOGOK] },
+  ];
 
-// 배타 규칙
-const EXCLUSIVE_RULES = [
-  { keywords: ['박*영(2982)'], targets: [TARGETS.DOKSAN] },
-  { keywords: ['문*영(6825)'], targets: [TARGETS.DOGOK] },
-];
+  // 누적 규칙
+  const ADDITIVE_RULES = [
+    { keywords: ['문*영(8885)'],     targets: [TARGETS.JONGNO3, TARGETS.JONGNO_DEPOSIT] },
+    { keywords: ['110-***-038170'], targets: [TARGETS.YONGSAN] },
+    { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
+    { keywords: ['신한'],            targets: [TARGETS.YONGSAN] },  // 신한 추가
+  ];
 
-// 누적 규칙
-const ADDITIVE_RULES = [
-  { keywords: ['문*영(8885)'],     targets: [TARGETS.JONGNO3, TARGETS.JONGNO_DEPOSIT] },
-  { keywords: ['110-***-038170'], targets: [TARGETS.YONGSAN] },
-  { keywords: ['877001**550'],    targets: [TARGETS.JONGNO2, TARGETS.JONGNO_DEPOSIT] },
-];
+  // 입금 포함 AND 출금 미포함
+  function shouldForward(text){
+    const t = (text || '').replace(/\s+/g, '');
+    const hasDeposit = /입금/.test(t);
+    const hasWithdraw = /출금/.test(t);
+    return hasDeposit && !hasWithdraw;
+  }
 
-// “입금” 포함 AND “출금” 미포함(공백 제거 후 판별)
-function shouldForward(text){
-  const t = (text || '').replace(/\s+/g, '');
-  const hasDeposit = /입금/.test(t);
-  const hasWithdraw = /출금/.test(t);
-  return hasDeposit && !hasWithdraw;
-}
+  // 포맷팅 함수
+  function formatMessage(raw){
+    const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-// 표시용 가공
-function formatMessage(raw){
-  const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
+    const drop = (s) =>
+      /^\d{7,}$/.test(s) ||
+      /^\[?Web발신\]?$/i.test(s) ||
+      /^거래후잔액\s*:/.test(s) ||
+      /^잔액\s*[\d,]+/.test(s) ||  // 잔액 줄 제거 추가
+      /^\[?카카오뱅크\]?$/i.test(s) ||
+      isMaskedAccount(s);
 
-  const isMaskedAccount = (s) => /[*-]/.test(s) || /^\d{6,}$/.test(s);
-  const drop = (s) =>
-    /^\d{7,}$/.test(s) ||
-    /^\[?Web발신\]?$/i.test(s) ||
-    /^보낸사람\s*:/.test(s) ||
-    /^\[?카카오뱅크\]?$/i.test(s) ||
-    isMaskedAccount(s);
+    const cleaned = lines.filter(s => !drop(s));
 
-  const cleaned = lines.filter(s => !drop(s));
+    const dateRegex = /\d{2}\/\d{2}\s+\d{2}:\d{2}/;
+    const isKakao = lines.some(s => /카카오뱅크/i.test(s));
 
-  const dateRegex = /\d{2}\/\d{2}\s+\d{2}:\d{2}/;
-  const isKakao = lines.some(s => /카카오뱅크/i.test(s));
+    const bankDateLine = cleaned.find(s => dateRegex.test(s) && /신한|\[?kb\]?|국민|농협|우리|ibk|하나|기업/i.test(s));
+    const dateOnlyLine = cleaned.find(s => dateRegex.test(s));
 
-  const bankDateLine = cleaned.find(s => dateRegex.test(s) && /신한|\[?kb\]?|국민|농협|우리|ibk|하나|기업/i.test(s));
-  const dateOnlyLine = cleaned.find(s => dateRegex.test(s));
+    const depositLine = cleaned.find(s => /입금/.test(s));
+    const depositIdx = depositLine ? cleaned.indexOf(depositLine) : -1;
 
-  const depositLine = cleaned.find(s => /입금/.test(s));
-  const depositIdx = depositLine ? cleaned.indexOf(depositLine) : -1;
+    const looksLikeNameLoose = (s) => /[가-힣]{2,}/.test(s) && !/\d/.test(s) && !/입금/.test(s);
+    const nameLike = (s) => /\(.+\)/.test(s) || /(호|실)/.test(s) || looksLikeNameLoose(s);
+    const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
+    const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
 
-  const looksLikeNameLoose = (s) => /[가-힣]{2,}/.test(s) && !/\d/.test(s) && !/입금/.test(s);
-  const nameLike = (s) => /\(.+\)/.test(s) || /(호|차)/.test(s) || looksLikeNameLoose(s);
-  const nameLine = cleaned.find(s => nameLike(s) && !/입금/.test(s));
-  const nameIdx = nameLine ? cleaned.indexOf(nameLine) : -1;
-
-  let amountLine = null;
-  if (depositIdx >= 0) {
-    for (let i = depositIdx + 1; i < cleaned.length; i++) {
-      const s = cleaned[i];
-      if (!s) continue;
-      if (/입금/.test(s)) continue;
-      if (/^[0-9][\d,]*원?$/.test(s)) { amountLine = s; break; }
-      break;
+    let amountLine = null;
+    if (depositIdx >= 0) {
+      for (let i = depositIdx + 1; i < cleaned.length; i++) {
+        const s = cleaned[i];
+        if (!s) continue;
+        if (/입금/.test(s)) continue;
+        if (/^[0-9][\d,]*원?$/.test(s)) { amountLine = s; break; }
+        break;
+      }
     }
-  }
 
-  let extraLine = null;
-  for (const s of cleaned) {
-    if (s !== nameLine && !/입금/.test(s) && /(호|차)/.test(s)) { extraLine = s; break; }
-  }
-  if (isKakao && !extraLine && depositIdx >= 0) {
-    for (let i = depositIdx + 1; i < cleaned.length; i++) {
-      const s = cleaned[i];
-      if (!s || s === nameLine || /입금/.test(s)) continue;
-      if (!/^[0-9][\d,]*원?$/.test(s)) { extraLine = s; break; }
+    let extraLine = null;
+    for (const s of cleaned) {
+      if (s !== nameLine && !/입금/.test(s) && /(호|실)/.test(s)) { extraLine = s; break; }
     }
-  }
+    if (isKakao && !extraLine && depositIdx >= 0) {
+      for (let i = depositIdx + 1; i < cleaned.length; i++) {
+        const s = cleaned[i];
+        if (!s || s === nameLine || /입금/.test(s)) continue;
+        if (!/^[0-9][\d,]*원?$/.test(s)) { extraLine = s; break; }
+      }
+    }
 
-  const out = [];
-  if (isKakao) {
-    if (nameLine) out.push(nameLine);
-    if (dateOnlyLine) out.push(dateOnlyLine);
-    if (depositLine) out.push(depositLine);
-    if (extraLine && extraLine !== nameLine) out.push(extraLine);
-  } else {
-    if (nameIdx >= 0 && (depositIdx < 0 || nameIdx < depositIdx)) {
-      if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
+    const out = [];
+    if (isKakao) {
       if (nameLine) out.push(nameLine);
+      if (dateOnlyLine) out.push(dateOnlyLine);
       if (depositLine) out.push(depositLine);
-      if (amountLine) out.push(amountLine);
       if (extraLine && extraLine !== nameLine) out.push(extraLine);
     } else {
-      if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
-      if (depositLine) out.push(depositLine);
-      if (amountLine) out.push(amountLine);
-      if (nameLine) out.push(nameLine);
-      if (extraLine && extraLine !== nameLine) out.push(extraLine);
+      if (nameIdx >= 0 && (depositIdx < 0 || nameIdx < depositIdx)) {
+        if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
+        if (nameLine) out.push(nameLine);
+        if (depositLine) out.push(depositLine);
+        if (amountLine) out.push(amountLine);
+        if (extraLine && extraLine !== nameLine) out.push(extraLine);
+      } else {
+        if (bankDateLine) out.push(bankDateLine); else if (dateOnlyLine) out.push(dateOnlyLine);
+        if (depositLine) out.push(depositLine);
+        if (amountLine) out.push(amountLine);
+        if (nameLine) out.push(nameLine);
+        if (extraLine && extraLine !== nameLine) out.push(extraLine);
+      }
+    }
+    return out.length ? out.join('\n') : raw;
+  }
+
+  function matchTargets(text){
+    if (!shouldForward(text)) return [];
+    const norm = normalize(text);
+    const result = new Set();
+
+    let exclusiveHit = false;
+    for (const r of EXCLUSIVE_RULES) {
+      if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
+    }
+    if (exclusiveHit) return [...result];
+
+    for (const r of ADDITIVE_RULES) {
+      if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
+    }
+    return [...result];
+  }
+
+  const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
+
+  const RESOLVED = {};
+  async function resolveAllTargets(){
+    const ids = Object.values(TARGETS).map(String);
+    for (const id of ids) {
+      try {
+        const entity = await client.getEntity(id);
+        RESOLVED[id] = entity;
+        const title = entity?.title || entity?.username || '';
+        console.log('target ok:', id, title);
+      } catch (e) {
+        console.error('target resolve fail:', id, e.message);
+      }
     }
   }
-  return out.length ? out.join('\n') : raw;
-}
+  function toPeer(id){ return RESOLVED[String(id)] || id; }
 
-function matchTargets(text){
-  if (!shouldForward(text)) return [];
-  const norm = normalize(text);
-  const result = new Set();
-
-  let exclusiveHit = false;
-  for (const r of EXCLUSIVE_RULES) {
-    if (includesAny(norm, r.keywords)) { exclusiveHit = true; r.targets.forEach(t => result.add(t)); }
+  function calcOriginTitle(targets){
+    if (TARGETS.JONGNO1 && targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
+    if (TARGETS.JONGNO2 && targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
+    if (TARGETS.JONGNO3 && targets.includes(TARGETS.JONGNO3)) return TARGET_TITLES[TARGETS.JONGNO3];
+    return null;
   }
-  if (exclusiveHit) return [...result];
 
-  for (const r of ADDITIVE_RULES) {
-    if (includesAny(norm, r.keywords)) r.targets.forEach(t => result.add(t));
-  }
-  return [...result];
-}
+  async function sendToTargets(messageEntity, content, targets){
+    const originTitle = calcOriginTitle(targets);
 
-const client = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, { connectionRetries: 5 });
-
-const RESOLVED = {};
-async function resolveAllTargets(){
-  const ids = Object.values(TARGETS).map(String);
-  for (const id of ids) {
-    try {
-      const entity = await client.getEntity(id);
-      RESOLVED[id] = entity;
-      const title = entity?.title || entity?.username || '';
-      console.log('target ok:', id, title);
-    } catch (e) {
-      console.error('target resolve fail (가입/권한 확인 필요):', id, e.message);
-    }
-  }
-}
-function toPeer(id){ return RESOLVED[String(id)] || id; }
-
-function calcOriginTitle(targets){
-  if (TARGETS.JONGNO1 && targets.includes(TARGETS.JONGNO1)) return TARGET_TITLES[TARGETS.JONGNO1];
-  if (TARGETS.JONGNO2 && targets.includes(TARGETS.JONGNO2)) return TARGET_TITLES[TARGETS.JONGNO2];
-  if (TARGETS.JONGNO3 && targets.includes(TARGETS.JONGNO3)) return TARGET_TITLES[TARGETS.JONGNO3];
-  return null;
-}
-
-async function sendToTargets(messageEntity, content, targets){
-  const originTitle = calcOriginTitle(targets);
-
-  const results = await Promise.allSettled(
-    targets.map((id) => {
-      const title =
-        (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
-          ? originTitle
-          : TARGET_TITLES[String(id)];
-      const body = title ? `${title}\n${content}` : content;
-      return client.sendMessage(toPeer(id), { message: body });
-    })
-  );
-  results.forEach((r, i) => {
-    if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
-    else console.log('send ok:', targets[i]);
-  });
-}
-
-async function startUserbot(){
-  await client.connect();
-  console.log('Userbot connected.');
-  await resolveAllTargets();
-
-  client.addEventHandler(async (event) => {
-    try {
-      const text = event?.message?.message?.trim();
-      if (!text || !/^\/probe\b/i.test(text)) return;
-      const chatId = (event.chatId && event.chatId.toString()) || '';
-      const chat = await event.getChat();
-      const title = chat?.title || chat?.username || '';
-      console.log('PROBE chat id:', chatId, title);
-      await client.sendMessage(event.chatId, { message: `chat_id: ${chatId}\n${title}` });
-    } catch (e) {
-      console.error('probe error:', e.message);
-    }
-  }, new NewMessage({}));
-
-  client.addEventHandler(async (event) => {
-    try {
-      const chatId = (event.chatId && event.chatId.toString()) || '';
-      const msg = event.message;
-      const original = msg?.message || '';
-
-      if (chatId !== SOURCE_CHAT_ID) return;
-      if (!msg || msg.isOut) return;
-      if (!original.trim()) return;
-
-      const targets = matchTargets(original);
-      if (targets.length === 0) return;
-
-      const content = formatMessage(original);
-      await sendToTargets(msg, content, targets);
-    } catch (e) {
-      console.error('forward error:', e.message);
-    }
-  }, new NewMessage({}));
-
-  console.log('Listening on source chat:', SOURCE_CHAT_ID);
-}
-
-const PORT = Number(process.env.PORT || 10000);
-const server = http.createServer((req, res) => {
-  if (req.url === '/healthz') { res.writeHead(200, {'Content-Type':'text/plain'}); return res.end('ok'); }
-  res.writeHead(404, {'Content-Type':'text/plain'}); res.end('not found');
-});
-
-(async () => {
-  try {
-    await startUserbot();
-    server.listen(PORT, () => {
-      console.log('Health server on', PORT);
-
-      const KEEPALIVE_URL = `${BASE_URL}/healthz`;
-      console.log('keepalive to:', KEEPALIVE_URL);
-      const ping = () => {
-        https.get(KEEPALIVE_URL, (res) => res.resume())
-          .on('error', (e) => console.log('keepalive error:', e.message));
-      };
-      ping();
-      setInterval(ping, 4 * 60 * 1000);
+    const results = await Promise.allSettled(
+      targets.map((id) => {
+        const title =
+          (String(id) === String(TARGETS.JONGNO_DEPOSIT) && originTitle)
+            ? originTitle
+            : TARGET_TITLES[String(id)];
+        const body = title ? `${title}\n${content}` : content;
+        return client.sendMessage(toPeer(id), { message: body });
+      })
+    );
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') console.error('send fail:', targets[i], r.reason?.message || r.reason);
+      else console.log('send ok:', targets[i]);
     });
-  } catch (e) {
-    console.error('startup error:', e.message);
-    process.exit(1);
   }
-})();
+
+  async function startUserbot(){
+    await client.connect();
+    console.log('Userbot connected.');
+    await resolveAllTargets();
+
+    client.addEventHandler(async (event) => {
+      try {
+        const text = event?.message?.message?.trim();
+        if (!text || !/^\/probe\b/i.test(text)) return;
+        const chatId = (event.chatId && event.chatId.toString()) || '';
+        const chat = await event.getChat();
+        const title = chat?.title || chat?.username || '';
+        console.log('PROBE chat id:', chatId, title);
+        await client.sendMessage(event.chatId, { message: `chat_id: ${chatId}\n${title}` });
+      } catch (e) {
+        console.error('probe error:', e.message);
+      }
+    }, new NewMessage({}));
+
+    client.addEventHandler(async (event) => {
+      try {
+        const chatId = (event.chatId && event.chatId.toString()) || '';
+        const msg = event.message;
+        const original = msg?.message || '';
+
+        if (chatId !== SOURCE_CHAT_ID) return;
+        if (!msg || msg.isOut) return;
+        if (!original.trim()) return;
+
+        const targets = matchTargets(original);
+        if (targets.length === 0) return;
+
+        const content = formatMessage(original);
+        await sendToTargets(msg, content, targets);
+      } catch (e) {
+        console.error('forward error:', e.message);
+      }
+    }, new NewMessage({}));
+
+    console.log('Listening on source chat:', SOURCE_CHAT_ID);
+  }
+
+  const PORT = Number(process.env.PORT || 10000);
+  const server = http.createServer((req, res) => {
+    if (req.url === '/healthz') { res.writeHead(200, {'Content-Type':'text/plain'}); return res.end('ok'); }
+    res.writeHead(404, {'Content-Type':'text/plain'}); res.end('not found');
+  });
+
+  (async () => {
+    try {
+      await startUserbot();
+      server.listen(PORT, () => {
+        console.log('Health server on', PORT);
+
+        const KEEPALIVE_URL = `${BASE_URL}/healthz`;
+        console.log('keepalive to:', KEEPALIVE_URL);
+        const ping = () => {
+          https.get(KEEPALIVE_URL, (res) => res.resume())
+            .on('error', (e) => console.log('keepalive error:', e.message));
+        };
+        ping();
+        setInterval(ping, 4 * 60 * 1000);
+      });
+    } catch (e) {
+      console.error('startup error:', e.message);
+      process.exit(1);
+    }
+  })();
