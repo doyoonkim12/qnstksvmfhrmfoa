@@ -8,7 +8,9 @@
   },
   "scripts": {
     "start": "node userbot-router.js",
-    "login": "node login-once.js"
+    "login": "node login-once.js",
+    "test": "node --test",
+    "check": "node --check userbot-router.js && node --check login-once.js && node --check src/config.js && node --check src/routing.js && node --check src/format.js"
   },
   "dependencies": {
     "telegram": "^2.20.0",
