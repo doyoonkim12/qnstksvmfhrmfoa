@@ -140,6 +140,30 @@ function buildPrompt({ state, cfg, diff, files, tests, claudeReply }) {
   ].join('\n');
 }
 
+// reviewCmd 맨 앞 실행 파일을 찾는다. PATH 에 없으면 흔한 설치 위치를 뒤진다
+// (예: macOS ChatGPT 앱에 들어 있는 codex). 못 찾으면 null.
+function resolveReviewer(reviewCmd) {
+  const [bin, ...rest] = reviewCmd.trim().split(/\s+/);
+  const withBin = (p) => [JSON.stringify(p), ...rest].join(' ');
+  const exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+  if (bin === 'codex' && process.env.CROSS_REVIEW_CODEX) {
+    return exists(process.env.CROSS_REVIEW_CODEX) ? withBin(process.env.CROSS_REVIEW_CODEX) : null;
+  }
+  if (path.isAbsolute(bin)) return exists(bin) ? reviewCmd : null;
+  const onPath = process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`;
+  if (sh(onPath, { timeoutSec: 10 }).code === 0) return reviewCmd;
+  if (bin !== 'codex') return null;
+  const home = require('os').homedir();
+  const candidates = process.platform === 'win32'
+    ? [path.join(process.env.APPDATA || '', 'npm', 'codex.cmd'), path.join(home, '.local', 'bin', 'codex.exe')]
+    : ['/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
+      path.join(home, 'Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'),
+      '/opt/homebrew/bin/codex', '/usr/local/bin/codex',
+      path.join(home, '.local/bin/codex'), path.join(home, '.npm-global/bin/codex')];
+  const hit = candidates.find(exists);
+  return hit ? withBin(hit) : null;
+}
+
 function runReviewer(prompt, cfg) {
   const out = path.join(KIT, `last-review-${process.pid}.txt`);
   const cmd = cfg.reviewCmd.includes('{out}') ? cfg.reviewCmd.replace('{out}', JSON.stringify(out)) : cfg.reviewCmd;
@@ -213,11 +237,14 @@ function onStop(input) {
   const hash = crypto.createHash('sha1').update(diff).digest('hex');
   if (hash === state.lastHash) return 0;                        // 이미 검증한 상태 그대로
 
-  const bin = cfg.reviewCmd.trim().split(/\s+/)[0];
-  if (sh(process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`, { timeoutSec: 10 }).code !== 0) {
-    process.stderr.write(`cross-review: 리뷰어 '${bin}' 이(가) 이 컴퓨터에 없어 교차 검증을 건너뜀 (config.json reviewCmd 확인)\n`);
+  const resolved = resolveReviewer(cfg.reviewCmd);
+  if (!resolved) {
+    const bin = cfg.reviewCmd.trim().split(/\s+/)[0];
+    process.stderr.write(`cross-review: 리뷰어 '${bin}' 을(를) 이 컴퓨터에서 못 찾아 교차 검증을 건너뜀 ` +
+      '(환경변수 CROSS_REVIEW_CODEX 에 전체 경로를 넣거나 config.json reviewCmd 확인)\n');
     return 0;
   }
+  cfg.reviewCmd = resolved;
 
   const tests = runTests(cfg);
   const claudeReply = lastAssistantText(input.transcript_path);
@@ -263,4 +290,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { buildPrompt, relevant, DEFAULTS };
+module.exports = { buildPrompt, relevant, resolveReviewer, DEFAULTS };

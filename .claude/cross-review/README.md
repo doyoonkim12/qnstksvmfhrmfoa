@@ -17,7 +17,11 @@ Claude 수정 → (멈추는 순간) 테스트 실행 + Codex 검증
    - `testCmd`: 그 프로젝트의 테스트 명령 (예: `pnpm verify:fast`, `pytest -q`). 비우면 테스트 없이 검증
    - `riskyPaths`: 바뀌면 PASS 여도 "사장님 결재" 항목을 붙일 경로 (결제·주문·배포·키)
    - `reviewCmd`: 기본은 `codex exec --sandbox read-only --skip-git-repo-check -o {out} -`
-     → 설치 후 `codex exec --help` 로 옵션 이름이 맞는지 한 번 확인
+     (옵션 이름은 2026-11 macOS ChatGPT 앱 내장 codex 에서 확인됨)
+   - `codex` 가 PATH 에 없어도 자동으로 찾음: macOS ChatGPT 앱 내장 CLI, Homebrew,
+     `~/.local/bin`, npm 전역(Windows `%APPDATA%\npm\codex.cmd`) 순서.
+     그래도 못 찾으면 환경변수 `CROSS_REVIEW_CODEX` 에 전체 경로를 넣는다.
+     → **config.json 에 컴퓨터별 전체 경로를 적지 말 것** (다른 컴퓨터에서 깨짐)
 3. `.claude/settings.json` 의 `hooks` 에 추가
 
 ```json
