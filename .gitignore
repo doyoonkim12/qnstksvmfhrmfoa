@@ -3,3 +3,5 @@ node_modules/
 .env.*
 *.session
 .claude/settings.local.json
+.claude/cross-review/state.json
+.claude/cross-review/last-review-*.txt

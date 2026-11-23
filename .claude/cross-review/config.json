@@ -1,0 +1,7 @@
+{
+  "reviewCmd": "codex exec --sandbox read-only --skip-git-repo-check -o {out} -",
+  "testCmd": "npm test --silent",
+  "maxFixRounds": 2,
+  "outDir": "reviews",
+  "riskyPaths": ["src/config.js"]
+}
