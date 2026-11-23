@@ -69,7 +69,7 @@ const tail = (s, n) => (s.length > n ? '…(앞부분 생략)…\n' + s.slice(-n
 function snapshot() {
   const head = git(['rev-parse', 'HEAD']).trim();
   const stash = git(['stash', 'create']).trim(); // 작업 트리 상태를 커밋으로 (아무것도 안 바꿈)
-  const untracked = git(['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean);
+  const untracked = git(['ls-files', '-z', '--others', '--exclude-standard']).split('\0').filter(Boolean);
   return { base: stash || head, untracked };
 }
 
@@ -80,11 +80,11 @@ function relevant(file, cfg) {
 
 function collectDiff(state, cfg) {
   if (!state.base) return { diff: '', files: [] };
-  const names = git(['diff', '--name-only', state.base]).split('\n').filter(Boolean);
+  const names = git(['diff', '-z', '--name-only', state.base]).split('\0').filter(Boolean);
   const files = names.filter((f) => relevant(f, cfg));
   let diff = files.length ? git(['diff', '--no-color', state.base, '--', ...files]) : '';
   const known = new Set(state.untracked || []);
-  const added = git(['ls-files', '--others', '--exclude-standard']).split('\n')
+  const added = git(['ls-files', '-z', '--others', '--exclude-standard']).split('\0')
     .filter((f) => f && !known.has(f) && relevant(f, cfg));
   for (const f of added) {
     let body = '';
