@@ -40,6 +40,26 @@ Claude 수정 → (멈추는 순간) 테스트 실행 + Codex 검증
 
 5. Claude Code 를 새로 시작 (훅은 시작할 때 읽힘)
 
+## 속도 설정
+
+- **기다리는 틈 없음**: Claude 가 멈추는 순간 검증 시작, 검증이 끝나는 순간 결과가 Claude 에게 감
+- `parallelTests` (기본 `true`): 테스트와 Codex 를 **동시에** 돌림 → 걸리는 시간 = 둘 중 긴 쪽.
+  테스트가 깨지면 Codex 가 PASS 해도 키트가 FAIL(`[T1]`)로 합침. `false` 면 테스트 결과를 Codex 에게 보여준 뒤 검증(더 느림)
+- `modelTiers`: 바뀐 줄 수에 따라 Codex 옵션을 고름 (`tierLines`: 40줄 이하 small, 400줄 이하 medium, 그 위 large).
+  `riskyPaths` 를 건드리면 크기와 상관없이 `risky`. 값은 `codex exec` 바로 뒤에 붙는 옵션 문자열:
+
+```json
+"modelTiers": {
+  "small":  "-m <빠른 모델> -c model_reasoning_effort=low",
+  "medium": "",
+  "large":  "-m <가장 좋은 모델> -c model_reasoning_effort=high",
+  "risky":  "-m <가장 좋은 모델> -c model_reasoning_effort=high"
+}
+```
+
+  모델 이름과 `-c` 옵션은 그 컴퓨터의 `codex exec --help` 와 `codex` 설정에서 확인해서 채운다. 비워 두면 Codex 기본 모델.
+- `reviews/` 기록에 회차마다 **모델 단계와 걸린 시간**(테스트·Codex 각각)이 남아서 어디가 느린지 볼 수 있음
+
 ## 동작 규칙
 
 - 코드 파일이 안 바뀌었으면 검증 안 함 (질문·문서 작업은 그냥 통과)

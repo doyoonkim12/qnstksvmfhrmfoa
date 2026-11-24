@@ -19,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 
 const ROOT = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const KIT = path.join(ROOT, '.claude', 'cross-review');
@@ -38,6 +38,12 @@ const DEFAULTS = {
   maxDiffChars: 60000,
   testTimeoutSec: 300,
   reviewTimeoutSec: 600,
+  // 속도: 테스트와 Codex 검증을 동시에 돌림. 테스트 실패는 키트가 직접 FAIL 로 합침
+  parallelTests: true,
+  // 변경 크기별 Codex 옵션 (reviewCmd 의 exec 뒤에 끼워 넣음). 비우면 Codex 기본 모델
+  // 예: "small": "-m <빠른모델> -c model_reasoning_effort=low"  ← 이름은 codex 도움말에서 확인
+  modelTiers: { small: '', medium: '', large: '', risky: '' },
+  tierLines: { small: 40, medium: 400 }, // 바뀐 줄 수 기준. 위험 경로가 있으면 무조건 risky
 };
 
 function loadConfig() {
@@ -59,6 +65,21 @@ function git(args, opts = {}) {
 function sh(cmd, { input, timeoutSec }) {
   const r = spawnSync(cmd, { cwd: ROOT, shell: true, encoding: 'utf8', input, timeout: timeoutSec * 1000, maxBuffer: 64 * 1024 * 1024 });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), timedOut: r.error && r.error.code === 'ETIMEDOUT' };
+}
+// 비동기 버전 (테스트와 Codex 를 동시에 돌릴 때)
+function shAsync(cmd, { input, timeoutSec }) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const child = spawn(cmd, { cwd: ROOT, shell: true });
+    let out = ''; let timedOut = false;
+    const cap = (d) => { out += d; if (out.length > 4 * 1024 * 1024) out = out.slice(-2 * 1024 * 1024); };
+    child.stdout.on('data', cap); child.stderr.on('data', cap);
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutSec * 1000);
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: out + e.message, timedOut, sec: (Date.now() - t0) / 1000 }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, timedOut, sec: (Date.now() - t0) / 1000 }); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(input || '');
+  });
 }
 const now = () => new Date().toISOString().replace('T', ' ').slice(0, 16);
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
@@ -122,7 +143,8 @@ function buildPrompt({ state, cfg, diff, files, tests, claudeReply }) {
     `[바뀐 파일] ${files.join(', ')}`,
     '',
     state.prevFindings ? `[지난 회차 지적]\n${state.prevFindings}\n\n[Claude 의 답변/반박]\n${claudeReply || '(없음)'}\n` : '',
-    `[테스트 결과] ${tests.summary}\n${tests.output}`,
+    tests ? `[테스트 결과] ${tests.summary}\n${tests.output}`
+      : '[테스트] 검증과 동시에 따로 돌고 있고, 결과는 키트가 직접 판정한다. 테스트 실행 여부는 지적하지 마라.',
     '',
     '[변경 내용]',
     tail(diff, cfg.maxDiffChars),
@@ -131,7 +153,7 @@ function buildPrompt({ state, cfg, diff, files, tests, claudeReply }) {
     '- 실제 버그, 요청과 다른 동작, 깨지는 테스트, 보안·돈·데이터 손실 위험만 지적한다. 취향·스타일은 지적하지 않는다.',
     '- 근거(파일:줄, 테스트 출력)가 없는 지적은 하지 않는다.',
     '- Claude 의 반박이 근거로 타당하면 그 항목은 지적에서 뺀다.',
-    '- 테스트가 실패하거나 실행되지 않았으면 그 사실을 지적한다.',
+    tests ? '- 테스트가 실패하거나 실행되지 않았으면 그 사실을 지적한다.' : '',
     '',
     '출력 형식 (정확히):',
     '첫 줄: VERDICT: PASS  또는  VERDICT: FAIL',
@@ -164,23 +186,48 @@ function resolveReviewer(reviewCmd) {
   return hit ? withBin(hit) : null;
 }
 
-function runReviewer(prompt, cfg) {
+// 변경 크기 → 모델 단계. 위험 경로가 하나라도 있으면 risky
+function pickTier(diff, files, cfg) {
+  if (files.some((f) => cfg.riskyPaths.some((p) => f === p || f.startsWith(p)))) return 'risky';
+  const changed = diff.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l)).length;
+  if (changed <= cfg.tierLines.small) return 'small';
+  if (changed <= cfg.tierLines.medium) return 'medium';
+  return 'large';
+}
+
+// 단계별 옵션을 reviewCmd 에 끼워 넣음: {model} 자리가 있으면 거기, 없으면 exec 바로 뒤
+function withTierArgs(cmd, args) {
+  if (cmd.includes('{model}')) return cmd.replace('{model}', args || '');
+  if (!args) return cmd;
+  return /\sexec(\s|$)/.test(cmd) ? cmd.replace(/\sexec(\s|$)/, ` exec ${args}$1`) : `${cmd} ${args}`;
+}
+
+async function runReviewer(prompt, cfg, tier) {
   const out = path.join(KIT, `last-review-${process.pid}.txt`);
-  const cmd = cfg.reviewCmd.includes('{out}') ? cfg.reviewCmd.replace('{out}', JSON.stringify(out)) : cfg.reviewCmd;
-  const r = sh(cmd, { input: prompt, timeoutSec: cfg.reviewTimeoutSec });
+  let cmd = withTierArgs(cfg.reviewCmd, (cfg.modelTiers || {})[tier]);
+  cmd = cmd.includes('{out}') ? cmd.replace('{out}', JSON.stringify(out)) : cmd;
+  const r = await shAsync(cmd, { input: prompt, timeoutSec: cfg.reviewTimeoutSec });
   let text = '';
   try { text = fs.readFileSync(out, 'utf8'); fs.unlinkSync(out); } catch { text = r.out; }
   const m = text.match(/VERDICT:\s*(PASS|FAIL)/i);
-  if (r.timedOut || !m) return { verdict: 'NOT_PROVEN', body: r.timedOut ? '리뷰어 시간 초과' : tail(text || r.out || '(출력 없음)', 3000) };
+  if (r.timedOut || !m) return { verdict: 'NOT_PROVEN', body: r.timedOut ? '리뷰어 시간 초과' : tail(text || r.out || '(출력 없음)', 3000), sec: r.sec };
   const body = text.slice(m.index + m[0].length).trim();
-  return { verdict: m[1].toUpperCase(), body };
+  return { verdict: m[1].toUpperCase(), body, sec: r.sec };
 }
 
-function runTests(cfg) {
-  if (!cfg.testCmd) return { summary: '설정된 테스트 명령 없음 (config.json testCmd)', output: '', ok: null };
-  const r = sh(cfg.testCmd, { timeoutSec: cfg.testTimeoutSec });
-  const ok = r.code === 0;
-  return { summary: `${cfg.testCmd} → ${r.timedOut ? '시간 초과' : ok ? '통과' : `실패(exit ${r.code})`}`, output: tail(r.out, 4000), ok };
+async function runTests(cfg) {
+  if (!cfg.testCmd) return { summary: '설정된 테스트 명령 없음 (config.json testCmd)', output: '', ok: null, sec: 0 };
+  const r = await shAsync(cfg.testCmd, { timeoutSec: cfg.testTimeoutSec });
+  const ok = r.code === 0 && !r.timedOut;
+  return { summary: `${cfg.testCmd} → ${r.timedOut ? '시간 초과' : ok ? '통과' : `실패(exit ${r.code})`}`, output: tail(r.out, 4000), ok, sec: r.sec };
+}
+
+// 동시 실행 모드: 테스트 실패를 판정에 합침 (Codex 가 PASS 해도 테스트가 깨졌으면 FAIL)
+function mergeTests(review, tests) {
+  if (tests.ok !== false) return review;
+  const t = `- [T1] 테스트 실패 — ${tests.summary} — 실패한 테스트를 고칠 것\n\n\`\`\`\n${tail(tests.output, 1500)}\n\`\`\``;
+  if (review.verdict === 'PASS') return { ...review, verdict: 'FAIL', body: t };
+  return { ...review, verdict: review.verdict === 'NOT_PROVEN' ? 'NOT_PROVEN' : 'FAIL', body: `${review.body}\n${t}` };
 }
 
 // ---------- 기록 파일 ----------
@@ -190,11 +237,13 @@ function reviewFile(state, cfg) {
   return path.join(ROOT, state.file);
 }
 
-function appendRound(state, cfg, { verdict, body, tests, files }) {
+function appendRound(state, cfg, { verdict, body, tests, files, tier, timing }) {
   const f = reviewFile(state, cfg);
   fs.mkdirSync(path.dirname(f), { recursive: true });
   if (!fs.existsSync(f)) fs.writeFileSync(f, `# 교차 검증 기록\n\n- 작업: ${state.taskPrompt || '(알 수 없음)'}\n- 시작: ${now()}\n`);
-  fs.appendFileSync(f, `\n## ${(state.fixRounds || 0) + 1}회차 검증 — ${verdict} (${now()})\n\n- 바뀐 파일: ${files.join(', ')}\n- 테스트: ${tests.summary}\n\n${body}\n`);
+  fs.appendFileSync(f, `\n## ${(state.fixRounds || 0) + 1}회차 검증 — ${verdict} (${now()})\n\n- 바뀐 파일: ${files.join(', ')}\n` +
+    `- 테스트: ${tests.summary}\n- 모델 단계: ${tier}${(cfg.modelTiers || {})[tier] ? ` (${cfg.modelTiers[tier]})` : ' (Codex 기본)'}\n` +
+    `- 걸린 시간: ${timing}\n\n${body}\n`);
 }
 
 function finalize(state, cfg, { verdict, body, files }) {
@@ -227,7 +276,7 @@ function onPrompt(input) {
   saveState({ ...snap, taskPrompt: (input.prompt || '').slice(0, 500), fixRounds: 0, history: [] });
 }
 
-function onStop(input) {
+async function onStop(input) {
   const cfg = loadConfig();
   let state = loadState();
   if (!state.base) { state = { ...state, ...snapshot() }; saveState(state); return 0; }
@@ -246,11 +295,22 @@ function onStop(input) {
   }
   cfg.reviewCmd = resolved;
 
-  const tests = runTests(cfg);
+  const t0 = Date.now();
+  const tier = pickTier(diff, files, cfg);
   const claudeReply = lastAssistantText(input.transcript_path);
-  const { verdict, body } = runReviewer(buildPrompt({ state, cfg, diff, files, tests, claudeReply }), cfg);
+  let tests; let review;
+  if (cfg.parallelTests) {
+    const prompt = buildPrompt({ state, cfg, diff, files, tests: null, claudeReply });
+    [tests, review] = await Promise.all([runTests(cfg), runReviewer(prompt, cfg, tier)]);
+    review = mergeTests(review, tests);
+  } else {
+    tests = await runTests(cfg);
+    review = await runReviewer(buildPrompt({ state, cfg, diff, files, tests, claudeReply }), cfg, tier);
+  }
+  const { verdict, body } = review;
+  const timing = `총 ${((Date.now() - t0) / 1000).toFixed(0)}초 (테스트 ${tests.sec.toFixed(0)}초, Codex ${review.sec.toFixed(0)}초, ${cfg.parallelTests ? '동시 실행' : '순서대로'})`;
 
-  appendRound(state, cfg, { verdict, body, tests, files });
+  appendRound(state, cfg, { verdict, body, tests, files, tier, timing });
   state.lastHash = hash;
 
   if (verdict === 'FAIL' && (state.fixRounds || 0) < cfg.maxFixRounds) {
@@ -282,7 +342,13 @@ if (require.main === module) {
   const input = readInput();
   try {
     if (mode === 'prompt') { onPrompt(input); process.exit(0); }
-    if (mode === 'stop') process.exit(onStop(input));
+    if (mode === 'stop') {
+      onStop(input).then((code) => process.exit(code)).catch((e) => {
+        process.stderr.write(`cross-review 오류(검증 건너뜀): ${e.message}\n`);
+        process.exit(0);
+      });
+      return;
+    }
   } catch (e) {
     process.stderr.write(`cross-review 오류(검증 건너뜀): ${e.message}\n`);
     process.exit(0); // 키트 오류로 Claude 작업이 막히지 않게
@@ -290,4 +356,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { buildPrompt, relevant, resolveReviewer, DEFAULTS };
+module.exports = { buildPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };
