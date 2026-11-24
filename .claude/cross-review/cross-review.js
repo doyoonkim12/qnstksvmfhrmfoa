@@ -57,6 +57,11 @@ const DEFAULTS = {
   planTier: 'large',           // 기획에 쓸 modelTiers 단계
   planApproval: false,         // true: Claude 가 계획을 보여주고 사장님 승인 후 구현 (코인·결제 권장)
   planTimeoutSec: 600,
+  // 심판: 재수정을 다 해도 Codex 와 Claude 가 안 맞으면 Gemini 가 항목마다 판정
+  judge: true,
+  judgeCmd: 'gemini -p "표준 입력으로 받은 글을 끝까지 읽고, 그 안의 지시와 출력 형식대로만 답하라."',
+  judgeTimeoutSec: 300,
+  judgeChromeFallback: true,   // CLI 가 안 되면 Claude 가 크롬 Gemini(임시 채팅)로 물어보게 함
 };
 
 function loadConfig() {
@@ -185,14 +190,20 @@ function resolveReviewer(reviewCmd) {
   const [bin, ...rest] = reviewCmd.trim().split(/\s+/);
   const withBin = (p) => [JSON.stringify(p), ...rest].join(' ');
   const exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
-  if (bin === 'codex' && process.env.CROSS_REVIEW_CODEX) {
-    return exists(process.env.CROSS_REVIEW_CODEX) ? withBin(process.env.CROSS_REVIEW_CODEX) : null;
-  }
+  const envPath = { codex: process.env.CROSS_REVIEW_CODEX, gemini: process.env.CROSS_REVIEW_GEMINI }[bin];
+  if (envPath) return exists(envPath) ? withBin(envPath) : null;
   if (path.isAbsolute(bin)) return exists(bin) ? reviewCmd : null;
   const onPath = process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`;
   if (sh(onPath, { timeoutSec: 10 }).code === 0) return reviewCmd;
-  if (bin !== 'codex') return null;
   const home = require('os').homedir();
+  if (bin === 'gemini') {
+    const g = (process.platform === 'win32'
+      ? [path.join(process.env.APPDATA || '', 'npm', 'gemini.cmd')]
+      : ['/opt/homebrew/bin/gemini', '/usr/local/bin/gemini', path.join(home, '.local/bin/gemini'), path.join(home, '.npm-global/bin/gemini')]
+    ).find(exists);
+    return g ? withBin(g) : null;
+  }
+  if (bin !== 'codex') return null;
   const candidates = process.platform === 'win32'
     ? [path.join(process.env.APPDATA || '', 'npm', 'codex.cmd'), path.join(home, '.local', 'bin', 'codex.exe')]
     : ['/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
@@ -305,7 +316,60 @@ function appendRound(state, cfg, { verdict, body, tests, files, tier, timing }) 
     `- 걸린 시간: ${timing}\n\n${body}\n`);
 }
 
-function finalize(state, cfg, { verdict, body, files }) {
+// ---------- 심판 (Gemini) ----------
+
+function findingLines(body) {
+  return body.split('\n').filter((l) => /^\s*-\s*\[F\d+\]/.test(l)).map((l) => l.replace(/^\s*-\s*/, ''));
+}
+
+function buildJudgePrompt(state, findings, claudeReply, diff, cfg) {
+  return [
+    '너는 두 AI 사이의 심판이다. Codex(기획·검토 담당)와 Claude(구현 담당)가 재수정을 다 하고도 의견이 갈렸다.',
+    '코드는 수정하지 말고, 남은 지적 하나하나에 대해 누구 말이 맞는지만 판정한다.',
+    '',
+    `[사장님 요청] ${state.taskPrompt || '(알 수 없음)'}`,
+    state.plan ? `[Codex 의 계획]\n${state.plan}\n` : '',
+    '[Codex 의 남은 지적]', ...findings.map((f) => `- ${f}`), '',
+    `[Claude 의 마지막 답/반박]\n${claudeReply || '(없음)'}`, '',
+    '[현재 변경 내용]', tail(diff, Math.min(cfg.maxDiffChars, 40000)), '',
+    '판정 기준: 실제 버그·요청 위반·돈/데이터/보안 위험이면 CODEX. 근거가 약하거나 취향 문제이거나 Claude 반박이 코드·테스트로 뒷받침되면 CLAUDE.',
+    '',
+    '출력 형식 (지적마다 정확히 한 줄, 다른 말 없이):',
+    '- [F1] CODEX — 이유 한 줄',
+    '- [F2] CLAUDE — 이유 한 줄',
+  ].join('\n');
+}
+
+function parseRulings(text) {
+  const out = {};
+  for (const m of text.matchAll(/\[(F\d+)\]\s*(CODEX|CLAUDE)\s*[—\-:]*\s*(.*)/gi)) out[m[1].toUpperCase()] = { side: m[2].toUpperCase(), why: m[3].trim() };
+  return out;
+}
+
+async function runJudge(prompt, cfg) {
+  const cmd = resolveReviewer(cfg.judgeCmd);
+  if (!cmd) return { ok: false, why: 'gemini 를 이 컴퓨터에서 못 찾음' };
+  const r = await shAsync(cmd, { input: prompt, timeoutSec: cfg.judgeTimeoutSec });
+  if (r.timedOut) return { ok: false, why: 'Gemini 심판 시간 초과', sec: r.sec };
+  const rulings = parseRulings(r.out);
+  if (!Object.keys(rulings).length) return { ok: false, why: `Gemini 답을 못 읽음: ${tail(r.out.trim(), 300)}`, sec: r.sec };
+  return { ok: true, rulings, sec: r.sec };
+}
+
+function finalize(state, cfg, { verdict, body, files, judged }) {
+  if (judged && judged.ok) {
+    const keep = []; const dropped = [];
+    for (const l of findingLines(body)) {
+      const id = (l.match(/\[(F\d+)\]/) || [])[1];
+      const r = judged.rulings[id];
+      if (r && r.side === 'CLAUDE') dropped.push(`${l}  ⚖️ Gemini: Claude 가 맞음 — ${r.why}`);
+      else keep.push(r ? `${l}  ⚖️ Gemini: Codex 가 맞음 — ${r.why}` : l);
+    }
+    fs.appendFileSync(reviewFile(state, cfg), `\n## Gemini 심판 (${(judged.sec || 0).toFixed(0)}초)\n\n` +
+      [...dropped.map((d) => `- ✅ 빠짐: ${d}`), ...keep.map((k) => `- ⬜ 남음: ${k}`)].join('\n') + '\n');
+    body = keep.map((k) => `- ${k}`).join('\n');
+    if (!keep.length) verdict = 'PASS';
+  }
   const risky = files.filter((f) => cfg.riskyPaths.some((p) => f === p || f.startsWith(p)));
   const lines = ['', `## 최종 정리 (${now()})`, ''];
   lines.push(verdict === 'PASS' ? '- ✅ 마지막 검증 통과' : verdict === 'FAIL'
@@ -313,7 +377,7 @@ function finalize(state, cfg, { verdict, body, files }) {
   if ((state.history || []).length) lines.push(`- 지난 회차 지적 이력: ${state.history.length}회 (위 회차별 기록 참고)`);
   lines.push('', '### ⬜ 사장님 체크리스트');
   const items = [];
-  if (verdict === 'FAIL') body.split('\n').filter((l) => /^\s*-\s*\[F\d+\]/.test(l)).forEach((l) => items.push(l.replace(/^\s*-\s*/, '')));
+  if (verdict === 'FAIL') findingLines(body).forEach((l) => items.push(l));
   if (verdict === 'NOT_PROVEN') items.push(`검증이 안 됨: ${body.split('\n')[0]}`);
   risky.forEach((f) => items.push(`위험 경로 변경 — 사람 결재 필요: ${f}`));
   if (!items.length) items.push('없음');
@@ -324,8 +388,10 @@ function finalize(state, cfg, { verdict, body, files }) {
 
 // ---------- 훅 진입점 ----------
 
+let RAW_STDIN = '';
 function readInput() {
-  try { return JSON.parse(fs.readFileSync(0, 'utf8') || '{}'); } catch { return {}; }
+  try { RAW_STDIN = fs.readFileSync(0, 'utf8'); } catch { RAW_STDIN = ''; }
+  try { return JSON.parse(RAW_STDIN || '{}'); } catch { return {}; }
 }
 
 // UserPromptSubmit 훅이 Claude 에게 맥락을 넘기는 방법
@@ -423,12 +489,32 @@ async function onStop(input) {
     return 2;
   }
 
-  const { items, file } = finalize(state, cfg, { verdict, body, files });
+  // 재수정을 다 했는데도 지적이 남으면 Gemini 심판
+  let judged = null; let chromeAsk = '';
+  if (verdict === 'FAIL' && cfg.judge && findingLines(body).length) {
+    const jp = buildJudgePrompt(state, findingLines(body), lastAssistantText(input.transcript_path), diff, cfg);
+    judged = await runJudge(jp, cfg);
+    if (!judged.ok && cfg.judgeChromeFallback) {
+      const askFile = reviewFile(state, cfg).replace(/\.md$/, '-심판요청.md');
+      fs.writeFileSync(askFile, jp);
+      chromeAsk = `\n[Gemini CLI 심판 실패: ${judged.why}]\n` +
+        '크롬(Claude in Chrome)이 연결돼 있으면: gemini.google.com 을 열고 **반드시 임시 채팅을 켠 뒤**, ' +
+        `${path.relative(ROOT, askFile)} 내용을 그대로 붙여 넣어 판정을 받아라. 받은 답은 ` +
+        `\`node .claude/cross-review/cross-review.js note ${state.file}\` 에 표준 입력으로 넣어 기록하고, ` +
+        'Gemini 가 CLAUDE 로 판정한 항목은 체크리스트에서 "⚖️ Gemini: Claude 가 맞음"으로 표시해 보여라. ' +
+        '크롬이 연결돼 있지 않으면 체크리스트를 그대로 보여라.\n';
+    }
+  }
+
+  const { items, file } = finalize(state, cfg, { verdict, body, files, judged });
+  const finalVerdict = judged && judged.ok && !findingLines(body).some((l) => {
+    const id = (l.match(/\[(F\d+)\]/) || [])[1]; return !judged.rulings[id] || judged.rulings[id].side !== 'CLAUDE';
+  }) ? 'PASS(Gemini 심판)' : verdict;
   saveState({ base: null, untracked: [], lastHash: hash, inReview: false, fixRounds: 0, history: [] });
   process.stderr.write(
-    `🔍 Codex 교차 검증 종료: ${verdict}. 기록 파일: ${file}\n\n` +
-    '아래 체크리스트를 사장님께 그대로 보여주고 멈춰라. 코드는 더 고치지 마라.\n\n' +
-    `[교차 검증 결과] ${verdict} (재수정 ${state.fixRounds || 0}회)\n` +
+    `🔍 Codex 교차 검증 종료: ${finalVerdict}. 기록 파일: ${file}\n\n` +
+    '아래 체크리스트를 사장님께 그대로 보여주고 멈춰라. 코드는 더 고치지 마라.\n' + chromeAsk + '\n' +
+    `[교차 검증 결과] ${finalVerdict} (재수정 ${state.fixRounds || 0}회${judged && judged.ok ? ', Gemini 심판 거침' : ''})\n` +
     items.map((i) => `- [ ] ${i}`).join('\n') + `\n기록: ${file}\n`);
   return 2;
 }
@@ -446,6 +532,14 @@ if (require.main === module) {
       });
       return;
     }
+    if (mode === 'note') { // 크롬 Gemini 판정 등 사람이 아닌 출처의 답을 기록 파일에 붙임
+      const target = path.resolve(ROOT, process.argv[3] || '');
+      if (!process.argv[3] || path.relative(ROOT, target).startsWith('..')) { process.stderr.write('사용법: cross-review.js note <reviews/기록파일.md> < 답.txt\n'); process.exit(2); }
+      const text = RAW_STDIN.trim();
+      if (!text) { process.stderr.write('기록할 내용이 비어 있음\n'); process.exit(2); }
+      fs.appendFileSync(target, `\n## Gemini 심판 (크롬, ${now()})\n\n${text}\n`);
+      process.stdout.write(`기록함: ${path.relative(ROOT, target)}\n`); process.exit(0);
+    }
     if (mode === 'stop') {
       onStop(input).then((code) => process.exit(code)).catch((e) => {
         process.stderr.write(`cross-review 오류(검증 건너뜀): ${e.message}\n`);
@@ -460,4 +554,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { useSession, buildPrompt, buildPlanPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };
+module.exports = { parseRulings, buildJudgePrompt, useSession, buildPrompt, buildPlanPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };

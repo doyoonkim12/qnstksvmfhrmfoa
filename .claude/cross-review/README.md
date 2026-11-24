@@ -9,7 +9,8 @@
 | 검토 · 반박 · 수정 제안 (자기 계획 기준) | **Codex** |
 | 다시 수정 | **Claude Code** |
 | 예시 사진 · 목업 · 일러스트 | **GPT** (`gen-image.js`) |
-| 재수정 2번 후에도 남은 것 | **사장님 체크리스트** |
+| 재수정 2번 후에도 의견이 갈린 것 | **Gemini 심판** (CLI → 안 되면 크롬 임시 채팅) |
+| 심판 뒤에도 남은 것 | **사장님 체크리스트** |
 
 ```
 사장님 요청 → Codex 기획 → Claude 구현 → Codex 검토(테스트와 동시에)
@@ -59,6 +60,18 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
 - `planApproval` (기본 `false`): `true` 면 Claude 가 계획을 보여주고 **사장님 승인 후** 구현. 코인·결제 프로젝트는 `true` 권장
 - `planTimeoutSec` (기본 600): 넘으면 기획 없이 진행하고 그 사실을 사장님께 알림 (NOT_PROVEN)
 - 훅 대기: 기획하는 동안(보통 1~5분) Claude 는 시작하지 않고 기다린다. UserPromptSubmit 훅 `timeout` 은 900 이상으로
+
+## Gemini 심판
+
+재수정을 다 하고도 Codex 지적이 남으면, 체크리스트로 넘기기 전에 Gemini 가 항목마다 판정한다.
+
+- `judge` (기본 `true`), `judgeCmd` (기본 `gemini -p "..."` — Gemini CLI, **구글 계정 로그인, API 키 아님**), `judgeTimeoutSec` 300
+- Gemini 가 **CLAUDE** 로 판정한 지적은 빠지고(⚖️ 기록), **CODEX** 로 판정한 것만 체크리스트에 남음. 다 빠지면 `PASS(Gemini 심판)`
+- `gemini` 는 PATH 에 없어도 Homebrew·npm 위치에서 찾음. 그래도 없으면 환경변수 `CROSS_REVIEW_GEMINI`
+- `judgeChromeFallback` (기본 `true`): CLI 가 안 되면(없음·한도·이상한 답) `reviews/…-심판요청.md` 를 만들고,
+  Claude 에게 **크롬 Gemini 임시 채팅**으로 판정받아 `node .claude/cross-review/cross-review.js note <기록파일> < 답` 으로 기록하게 함.
+  크롬이 연결돼 있지 않으면 체크리스트 그대로
+- 계정 2개가 있으면: CLI 는 계정 1, 크롬은 계정 2 로 로그인해 두면 한도에 덜 걸림
 
 ## 이미지 생성 (GPT 담당)
 
