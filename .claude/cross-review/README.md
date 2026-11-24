@@ -65,13 +65,14 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
 
 재수정을 다 하고도 Codex 지적이 남으면, 체크리스트로 넘기기 전에 Gemini 가 항목마다 판정한다.
 
-- `judge` (기본 `true`), `judgeCmd` (기본 `gemini -p "..."` — Gemini CLI, **구글 계정 로그인, API 키 아님**), `judgeTimeoutSec` 300
+- `judge` (기본 `true`), `judgeCmd` (기본 `gemini -p "..."` — Gemini CLI. 비우면 크롬으로 바로), `judgeTimeoutSec` 300
 - Gemini 가 **CLAUDE** 로 판정한 지적은 빠지고(⚖️ 기록), **CODEX** 로 판정한 것만 체크리스트에 남음. 다 빠지면 `PASS(Gemini 심판)`
 - `gemini` 는 PATH 에 없어도 Homebrew·npm 위치에서 찾음. 그래도 없으면 환경변수 `CROSS_REVIEW_GEMINI`
 - `judgeChromeFallback` (기본 `true`): CLI 가 안 되면(없음·한도·이상한 답) `reviews/…-심판요청.md` 를 만들고,
   Claude 에게 **크롬 Gemini 임시 채팅**으로 판정받아 `node .claude/cross-review/cross-review.js note <기록파일> < 답` 으로 기록하게 함.
   크롬이 연결돼 있지 않으면 체크리스트 그대로
 - 계정 2개가 있으면: CLI 는 계정 1, 크롬은 계정 2 로 로그인해 두면 한도에 덜 걸림
+- ⚠️ 2026-11 기준 Gemini CLI 는 개인 구글 계정 로그인이 막혔다("no longer supported for Gemini Code Assist for individuals"). 그 경우 `"judgeCmd": ""` 로 두면 CLI 를 건너뛰고 바로 크롬 Gemini(임시 채팅)로 판정한다
 
 ## 이미지 생성 (GPT 담당)
 

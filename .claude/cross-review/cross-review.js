@@ -347,6 +347,7 @@ function parseRulings(text) {
 }
 
 async function runJudge(prompt, cfg) {
+  if (!cfg.judgeCmd) return { ok: false, why: 'Gemini CLI 심판은 꺼 둠 (judgeCmd 비움) — 크롬으로 판정' };
   const cmd = resolveReviewer(cfg.judgeCmd);
   if (!cmd) return { ok: false, why: 'gemini 를 이 컴퓨터에서 못 찾음' };
   const r = await shAsync(cmd, { input: prompt, timeoutSec: cfg.judgeTimeoutSec });
