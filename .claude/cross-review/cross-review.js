@@ -190,7 +190,7 @@ function resolveReviewer(reviewCmd) {
   const [bin, ...rest] = reviewCmd.trim().split(/\s+/);
   const withBin = (p) => [JSON.stringify(p), ...rest].join(' ');
   const exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
-  const envPath = { codex: process.env.CROSS_REVIEW_CODEX, gemini: process.env.CROSS_REVIEW_GEMINI }[bin];
+  const envPath = { codex: process.env.CROSS_REVIEW_CODEX, gemini: process.env.CROSS_REVIEW_GEMINI, agy: process.env.CROSS_REVIEW_AGY }[bin];
   if (envPath) return exists(envPath) ? withBin(envPath) : null;
   if (path.isAbsolute(bin)) return exists(bin) ? reviewCmd : null;
   const onPath = process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`;
@@ -203,7 +203,13 @@ function resolveReviewer(reviewCmd) {
     ).find(exists);
     return g ? withBin(g) : null;
   }
-  if (bin !== 'codex') return null;
+  if (bin !== 'codex') { // 그 밖의 도구(예: Antigravity CLI 'agy')는 흔한 설치 위치만 찾아봄
+    const o = (process.platform === 'win32'
+      ? [path.join(process.env.APPDATA || '', 'npm', `${bin}.cmd`)]
+      : [`/opt/homebrew/bin/${bin}`, `/usr/local/bin/${bin}`, path.join(home, '.local/bin', bin), path.join(home, '.npm-global/bin', bin)]
+    ).find(exists);
+    return o ? withBin(o) : null;
+  }
   const candidates = process.platform === 'win32'
     ? [path.join(process.env.APPDATA || '', 'npm', 'codex.cmd'), path.join(home, '.local', 'bin', 'codex.exe')]
     : ['/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
