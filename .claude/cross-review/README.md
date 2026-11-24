@@ -8,6 +8,7 @@
 | 구현 · 수정 | **Claude Code** |
 | 검토 · 반박 · 수정 제안 (자기 계획 기준) | **Codex** |
 | 다시 수정 | **Claude Code** |
+| 예시 사진 · 목업 · 일러스트 | **GPT** (`gen-image.js`) |
 | 재수정 2번 후에도 남은 것 | **사장님 체크리스트** |
 
 ```
@@ -58,6 +59,24 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
 - `planApproval` (기본 `false`): `true` 면 Claude 가 계획을 보여주고 **사장님 승인 후** 구현. 코인·결제 프로젝트는 `true` 권장
 - `planTimeoutSec` (기본 600): 넘으면 기획 없이 진행하고 그 사실을 사장님께 알림 (NOT_PROVEN)
 - 훅 대기: 기획하는 동안(보통 1~5분) Claude 는 시작하지 않고 기다린다. UserPromptSubmit 훅 `timeout` 은 900 이상으로
+
+## 이미지 생성 (GPT 담당)
+
+예시 사진·목업·일러스트가 필요하면 Claude 는 직접 만들지 않고 GPT 에게 맡긴다.
+
+```bash
+node .claude/cross-review/gen-image.js "<무엇을 그릴지>" <저장 경로.png> [--size 1024x1024]
+```
+
+- `imageCmd` (기본 `codex exec --sandbox workspace-write --skip-git-repo-check -o {log} -`): 그림 파일을 써야 해서 쓰기 권한 샌드박스
+- **진짜 그림 파일(PNG/JPEG/WEBP)이 생겼는지 파일 앞부분까지 검사**. "만들었다"는 말만 있고 파일이 없으면 실패(NOT_PROVEN)
+- Codex 가 그림 말고 다른 파일을 바꾸면 경고 (자동으로 되돌리지 않음)
+- 기록: `reviews/images.md`
+- Codex 로 이미지가 안 되면: Higgsfield 연결의 `generate_image`(기본 모델 GPT 이미지)로 대신 — 스크립트가 실패할 때 그렇게 안내함
+- Codex 계획의 `## 이미지` 항목에 필요한 그림이 적혀 나온다
+- 기획 없이 하는 작업에서도 이 규칙을 지키게 하려면 프로젝트에 `CLAUDE.local.md`(개인용, git 에 안 올라감)를 만들고 한 줄 넣는다:
+  `- 예시 사진·목업·일러스트는 직접 만들지 말고 node .claude/cross-review/gen-image.js 로 GPT 에게 맡긴다.`
+  (`CLAUDE.local.md` 가 git 에 안 막혀 있으면 `.git/info/exclude` 에 추가)
 
 ## 속도 설정
 
