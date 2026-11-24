@@ -23,7 +23,7 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
 
 ## 설치 (프로젝트마다 한 번)
 
-1. 이 폴더(`.claude/cross-review/`)를 프로젝트의 `.claude/` 아래에 복사
+1. 이 폴더(`.claude/cross-review/`)를 프로젝트의 `.claude/` 아래에 복사 (`package.json` 포함 — 프로젝트가 `"type": "module"` 이어도 키트가 돌게 함)
 2. `config.json` 수정
    - `testCmd`: 그 프로젝트의 테스트 명령 (예: `pnpm verify:fast`, `pytest -q`). 비우면 테스트 없이 검증
    - `riskyPaths`: 바뀌면 PASS 여도 "사장님 결재" 항목을 붙일 경로 (결제·주문·배포·키)
@@ -117,6 +117,7 @@ node .claude/cross-review/gen-image.js "<무엇을 그릴지>" <저장 경로.pn
 
 - 코드 파일이 안 바뀌었으면 검증 안 함 (질문·문서 작업은 그냥 통과)
 - 같은 상태를 두 번 검증하지 않음 → 무한 반복 없음
+- git 저장소가 아닌 폴더: Codex 기획은 돌지만 검토는 못 함 → 조용히 넘기지 않고 세션에서 한 번 알림(NOT_PROVEN)
 - 세션마다 상태 파일을 따로 씀(`state-<세션>.json`) → 같은 폴더에서 Claude 여러 개가 떠 있어도 검토 회차가 안 섞임. 다만 작업 트리는 같이 쓰므로, 한 폴더에서 동시에 코드를 고치는 Claude 는 하나만 두는 게 좋다
 - Codex 는 **읽기 전용**으로만 실행 (코드 수정 불가)
 - 리뷰어가 답을 못 하면 `NOT_PROVEN` — 통과로 치지 않고 체크리스트에 올림

@@ -447,6 +447,16 @@ async function onPrompt(input) {
 async function onStop(input) {
   const cfg = loadConfig();
   let state = loadState();
+  if (git(['rev-parse', '--is-inside-work-tree']).trim() !== 'true') {
+    // git 폴더가 아니면 바뀐 코드를 못 잡아서 검토 불가 — 조용히 넘기지 않고 세션당 한 번 알림
+    if (!state.warnedNoGit) {
+      saveState({ ...state, warnedNoGit: true });
+      process.stderr.write('cross-review: 이 폴더는 git 저장소가 아니라 Codex 검토를 건너뜀(NOT_PROVEN). ' +
+        '검토를 쓰려면 사장님 확인 후 이 폴더에서 git init 과 기준 커밋을 만들어야 함. 이 사실을 사장님께 한 줄로 알려라.\n');
+      return 2;
+    }
+    return 0;
+  }
   if (!state.base) { state = { ...state, ...snapshot() }; saveState(state); return 0; }
 
   const { diff, files } = collectDiff(state, cfg);

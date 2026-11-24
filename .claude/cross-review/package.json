@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "commonjs",
+  "description": "키트는 CommonJS. 프로젝트 package.json 이 \"type\": \"module\" 이어도 이 폴더는 CommonJS 로 읽히게 함"
+}
