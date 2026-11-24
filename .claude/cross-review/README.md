@@ -44,7 +44,7 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
 4. `.gitignore` 에 추가
 
 ```
-.claude/cross-review/state.json
+.claude/cross-review/state*.json
 .claude/cross-review/last-review-*.txt
 ```
 
@@ -102,6 +102,7 @@ node .claude/cross-review/gen-image.js "<무엇을 그릴지>" <저장 경로.pn
 
 - 코드 파일이 안 바뀌었으면 검증 안 함 (질문·문서 작업은 그냥 통과)
 - 같은 상태를 두 번 검증하지 않음 → 무한 반복 없음
+- 세션마다 상태 파일을 따로 씀(`state-<세션>.json`) → 같은 폴더에서 Claude 여러 개가 떠 있어도 검토 회차가 안 섞임. 다만 작업 트리는 같이 쓰므로, 한 폴더에서 동시에 코드를 고치는 Claude 는 하나만 두는 게 좋다
 - Codex 는 **읽기 전용**으로만 실행 (코드 수정 불가)
 - 리뷰어가 답을 못 하면 `NOT_PROVEN` — 통과로 치지 않고 체크리스트에 올림
 - 이 컴퓨터에 `codex` 가 없으면 검증을 건너뛰고 알림만 남김

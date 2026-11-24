@@ -25,7 +25,12 @@ const { spawnSync, spawn } = require('child_process');
 
 const ROOT = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const KIT = path.join(ROOT, '.claude', 'cross-review');
-const STATE_FILE = path.join(KIT, 'state.json');
+// 세션마다 상태 파일을 따로 씀 (같은 폴더에서 Claude 여러 개가 동시에 돌아도 검토 기록이 안 섞이게)
+let STATE_FILE = path.join(KIT, 'state.json');
+function useSession(id) {
+  const safe = String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  if (safe) STATE_FILE = path.join(KIT, `state-${safe}.json`);
+}
 
 const DEFAULTS = {
   // {out} = Codex 마지막 답을 저장할 파일. 프롬프트는 stdin 으로 들어감
@@ -432,6 +437,7 @@ if (require.main === module) {
   if (process.env.CROSS_REVIEW_OFF === '1') process.exit(0);
   const mode = process.argv[2];
   const input = readInput();
+  useSession(input.session_id);
   try {
     if (mode === 'prompt') {
       onPrompt(input).then(() => process.exit(0)).catch((e) => {
@@ -454,4 +460,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { buildPrompt, buildPlanPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };
+module.exports = { useSession, buildPrompt, buildPlanPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };
