@@ -72,7 +72,12 @@ Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 �
   Claude 에게 **크롬 Gemini 임시 채팅**으로 판정받아 `node .claude/cross-review/cross-review.js note <기록파일> < 답` 으로 기록하게 함.
   크롬이 연결돼 있지 않으면 체크리스트 그대로
 - 계정 2개가 있으면: CLI 는 계정 1, 크롬은 계정 2 로 로그인해 두면 한도에 덜 걸림
-- Gemini CLI 후속은 **Antigravity CLI (`agy`)** — 개인 요금제 계정 로그인, `agy -p "..."` 로 한 번 실행 후 종료(headless). 맥에서 확인되면 `judgeCmd` 를 `agy -p "표준 입력으로 받은 글을 …"` 로 바꾼다 (표준 입력을 읽는지 먼저 시험). 환경변수 `CROSS_REVIEW_AGY` 로 경로 지정 가능
+- Gemini CLI 후속은 **Antigravity CLI (`agy`)** — 개인 요금제 계정 구글 로그인으로 됨 (2026-11 맥에서 확인).
+  **주의: agy 기본은 auto 모드(파일 수정·명령 실행을 묻지 않음)** → 반드시 `--mode plan --sandbox`.
+  `-p` 는 표준 입력을 안 읽고, 저장소 안에서 돌리면 파일을 뒤지느라 느리고(3~5분) 폴더마다 신뢰가 필요함.
+  그래서 **빈 폴더에서 표준 입력을 인자로 넘기는 방식**을 쓴다 (시험 130초, 파일 변경 없음):
+  `sh -c 'cd "$HOME/.cache/agy-judge" && exec "$HOME/.local/bin/agy" -p "$(cat)" --mode plan --sandbox <모델 옵션>'`
+  모델은 **Gemini 로 고정**할 것 (agy 에서 Claude 모델도 고를 수 있는데, 심판이 Claude 면 자기 편을 드는 셈). `judgeTimeoutSec` 는 400 권장
 - ⚠️ 2026-11 기준 Gemini CLI 는 개인 구글 계정 로그인이 막혔다("no longer supported for Gemini Code Assist for individuals"). 그 경우 `"judgeCmd": ""` 로 두면 CLI 를 건너뛰고 바로 크롬 Gemini(임시 채팅)로 판정한다
 
 ## 이미지 생성 (GPT 담당)
