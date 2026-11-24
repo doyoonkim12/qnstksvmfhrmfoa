@@ -27,7 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/cross-review/cross-review.js\" prompt"
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/cross-review/cross-review.js\" prompt",
+            "timeout": 900
           }
         ]
       }

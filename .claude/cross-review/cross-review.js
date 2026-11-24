@@ -2,16 +2,18 @@
 'use strict';
 
 /**
- * 교차 검증 키트 (Claude 수정 → Codex(GPT) 검증 → Claude 재수정 → … → 체크리스트)
+ * Codex ↔ Claude 협업 키트 — 역할: Codex = 기획·설계·검토·수정 제안 / Claude Code = 구현·수정
  *
- *   node cross-review.js prompt   ← UserPromptSubmit 훅: 작업 시작 시점 스냅샷
- *   node cross-review.js stop     ← Stop 훅: Claude 가 멈출 때마다 검증
+ *   node cross-review.js prompt   ← UserPromptSubmit 훅: 시작 스냅샷 + Codex 기획
+ *   node cross-review.js stop     ← Stop 훅: Claude 가 멈출 때마다 Codex 검토
  *
- * 흐름
- *   1) Claude 가 코드를 바꾸고 멈춤 → 바뀐 코드 + 테스트 결과를 Codex 에 보내 검증
- *   2) FAIL → 지적 사항을 Claude 에게 돌려줌 (exit 2) → Claude 가 고치거나 근거로 반박
+ * 흐름 (전부 같은 Claude Code 세션 안에서, 단계 사이 대기 없음)
+ *   0) 사장님 요청 → Codex 가 저장소를 읽고 기획·설계·작업 계획(완료 기준 포함)을 세움 → Claude 에게 전달
+ *   1) Claude 가 계획대로 구현하고 멈춤 → Codex 가 자기 계획 기준으로 검토 (테스트와 동시에)
+ *   2) FAIL → Codex 의 반박·수정 제안을 Claude 에게 → Claude 가 수정 (확실한 근거가 있으면 반론)
  *   3) 재수정은 maxFixRounds(기본 2)번까지. 그래도 남은 건 사장님 체크리스트로
- *   4) 끝나면 reviews/ 에 검증 파일을 남기고, Claude 가 세션에 요약을 올림
+ *   4) 기록은 reviews/ 에 (기획 → 회차별 검토 → 최종 정리), 요약은 세션에
+ *   Codex 는 매번 전체 맥락(자기 계획·지난 지적·Claude 답)을 넘겨받아 같은 대화처럼 이어감
  *
  * 설정: .claude/cross-review/config.json  /  끄기: 환경변수 CROSS_REVIEW_OFF=1
  */
@@ -44,6 +46,12 @@ const DEFAULTS = {
   // 예: "small": "-m <빠른모델> -c model_reasoning_effort=low"  ← 이름은 codex 도움말에서 확인
   modelTiers: { small: '', medium: '', large: '', risky: '' },
   tierLines: { small: 40, medium: 400 }, // 바뀐 줄 수 기준. 위험 경로가 있으면 무조건 risky
+  // 기획: 요청이 들어오면 Codex 가 먼저 기획·설계·계획을 세워 Claude 에게 넘김
+  planning: true,
+  planMinChars: 20,            // 이보다 짧은 메시지("응", "진행해")는 기획하지 않음
+  planTier: 'large',           // 기획에 쓸 modelTiers 단계
+  planApproval: false,         // true: Claude 가 계획을 보여주고 사장님 승인 후 구현 (코인·결제 권장)
+  planTimeoutSec: 600,
 };
 
 function loadConfig() {
@@ -136,9 +144,12 @@ function lastAssistantText(transcriptPath) {
 function buildPrompt({ state, cfg, diff, files, tests, claudeReply }) {
   const round = (state.fixRounds || 0) + 1;
   return [
-    '너는 다른 AI(Claude)가 방금 고친 코드를 검증하는 리뷰어다. 코드는 절대 수정하지 말고 판정만 한다.',
+    state.plan
+      ? '너는 이 작업의 기획·설계 담당이다. 네가 세운 계획을 Claude(구현 담당)가 구현했다. 코드는 절대 수정하지 말고, 계획대로 됐는지 검토하고 반박·수정 제안만 한다.'
+      : '너는 다른 AI(Claude)가 방금 고친 코드를 검증하는 리뷰어다. 코드는 절대 수정하지 말고 판정만 한다.',
     '',
     `[작업 요청] ${state.taskPrompt || '(알 수 없음)'}`,
+    state.plan ? `[네가 세운 계획]\n${state.plan}\n` : '',
     `[검증 회차] ${round} / ${cfg.maxFixRounds + 1}`,
     `[바뀐 파일] ${files.join(', ')}`,
     '',
@@ -153,6 +164,7 @@ function buildPrompt({ state, cfg, diff, files, tests, claudeReply }) {
     '- 실제 버그, 요청과 다른 동작, 깨지는 테스트, 보안·돈·데이터 손실 위험만 지적한다. 취향·스타일은 지적하지 않는다.',
     '- 근거(파일:줄, 테스트 출력)가 없는 지적은 하지 않는다.',
     '- Claude 의 반박이 근거로 타당하면 그 항목은 지적에서 뺀다.',
+    state.plan ? '- 계획의 완료 기준(C1, C2 …)을 하나씩 확인하고, 못 채운 기준은 지적한다. 계획에 없던 불필요한 변경도 지적한다.' : '',
     tests ? '- 테스트가 실패하거나 실행되지 않았으면 그 사실을 지적한다.' : '',
     '',
     '출력 형식 (정확히):',
@@ -202,13 +214,54 @@ function withTierArgs(cmd, args) {
   return /\sexec(\s|$)/.test(cmd) ? cmd.replace(/\sexec(\s|$)/, ` exec ${args}$1`) : `${cmd} ${args}`;
 }
 
-async function runReviewer(prompt, cfg, tier) {
-  const out = path.join(KIT, `last-review-${process.pid}.txt`);
+// Codex 한 번 호출 → 마지막 답 텍스트
+async function runCodex(prompt, cfg, tier, timeoutSec) {
+  const out = path.join(KIT, `last-review-${process.pid}-${Date.now()}.txt`);
   let cmd = withTierArgs(cfg.reviewCmd, (cfg.modelTiers || {})[tier]);
   cmd = cmd.includes('{out}') ? cmd.replace('{out}', JSON.stringify(out)) : cmd;
-  const r = await shAsync(cmd, { input: prompt, timeoutSec: cfg.reviewTimeoutSec });
+  const r = await shAsync(cmd, { input: prompt, timeoutSec });
   let text = '';
   try { text = fs.readFileSync(out, 'utf8'); fs.unlinkSync(out); } catch { text = r.out; }
+  return { text, raw: r.out, timedOut: r.timedOut, sec: r.sec };
+}
+
+// ---------- 기획 (Codex) ----------
+
+function buildPlanPrompt(taskPrompt) {
+  return [
+    '너는 이 작업의 기획·설계 담당이다. 구현은 다른 AI(Claude Code)가 한다.',
+    '저장소를 읽어서 현재 구조를 파악하고 계획만 세운다. 코드는 절대 수정하지 않는다.',
+    '',
+    `[사장님 요청] ${taskPrompt}`,
+    '',
+    '코드를 바꿀 필요가 없는 요청(질문, 확인, 잡담, 설명 요청)이면 첫 줄에 "PLAN: NONE" 만 출력하고 끝낸다.',
+    '',
+    '코드 작업이면 정확히 이 형식으로:',
+    'PLAN: READY',
+    '## 목표 (한두 줄)',
+    '## 설계 (어떤 방식으로, 왜. 다른 방법을 버린 이유 한 줄)',
+    '## 바꿀 파일 (파일 경로 — 무엇을)',
+    '## 단계 (1. 2. 3. 순서대로, 각 단계는 작게)',
+    '## 테스트 (추가·수정할 테스트와 돌릴 명령)',
+    '## 위험 (돈·데이터·보안·배포에 닿는 부분, 없으면 "없음")',
+    '## 완료 기준 (C1, C2 … 검토 때 하나씩 확인할 수 있게 구체적으로)',
+    '',
+    '요청이 애매하면 가장 그럴듯한 해석으로 계획하고, ## 위험 에 "확인 필요: …" 로 적는다.',
+  ].join('\n');
+}
+
+async function makePlan(taskPrompt, cfg) {
+  const r = await runCodex(buildPlanPrompt(taskPrompt), cfg, cfg.planTier, cfg.planTimeoutSec);
+  if (r.timedOut) return { status: 'NOT_PROVEN', body: 'Codex 기획 시간 초과', sec: r.sec };
+  if (/^\s*PLAN:\s*NONE/im.test(r.text)) return { status: 'NONE', sec: r.sec };
+  const m = r.text.match(/PLAN:\s*READY/i);
+  if (!m) return { status: 'NOT_PROVEN', body: tail(r.text || r.raw || '(출력 없음)', 1500), sec: r.sec };
+  return { status: 'READY', body: r.text.slice(m.index + m[0].length).trim(), sec: r.sec };
+}
+
+async function runReviewer(prompt, cfg, tier) {
+  const { text, raw, timedOut, sec } = await runCodex(prompt, cfg, tier, cfg.reviewTimeoutSec);
+  const r = { out: raw, timedOut, sec };
   const m = text.match(/VERDICT:\s*(PASS|FAIL)/i);
   if (r.timedOut || !m) return { verdict: 'NOT_PROVEN', body: r.timedOut ? '리뷰어 시간 초과' : tail(text || r.out || '(출력 없음)', 3000), sec: r.sec };
   const body = text.slice(m.index + m[0].length).trim();
@@ -269,11 +322,46 @@ function readInput() {
   try { return JSON.parse(fs.readFileSync(0, 'utf8') || '{}'); } catch { return {}; }
 }
 
-function onPrompt(input) {
+// UserPromptSubmit 훅이 Claude 에게 맥락을 넘기는 방법
+function giveContext(text) {
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } }));
+}
+
+async function onPrompt(input) {
+  const cfg = loadConfig();
   const state = loadState();
-  if (state.inReview) return; // 검증 루프 진행 중이면 기준점 유지
-  const snap = snapshot();
-  saveState({ ...snap, taskPrompt: (input.prompt || '').slice(0, 500), fixRounds: 0, history: [] });
+  const prompt = (input.prompt || '').trim();
+  if (state.inReview) return; // 검토 루프 진행 중이면 기준점 유지
+  // 계획을 받고 아직 구현 전인데 짧은 답("응", "진행해")이 오면 같은 작업으로 이어감
+  if (state.planPending && prompt.length < cfg.planMinChars) return;
+
+  const next = { ...snapshot(), taskPrompt: prompt.slice(0, 2000), fixRounds: 0, history: [] };
+  saveState(next);
+  if (!cfg.planning || prompt.length < cfg.planMinChars) return;
+
+  const resolved = resolveReviewer(cfg.reviewCmd);
+  if (!resolved) return; // codex 없으면 기획 없이 평소대로
+  cfg.reviewCmd = resolved;
+
+  const plan = await makePlan(prompt, cfg);
+  if (plan.status === 'NONE') return;
+  if (plan.status !== 'READY') {
+    giveContext(`[Codex 기획 실패 — NOT_PROVEN] ${plan.body}\n평소처럼 진행하되, 기획 없이 진행한다는 사실을 사장님께 한 줄로 알려라.`);
+    return;
+  }
+  next.plan = plan.body;
+  next.planPending = true;
+  const f = reviewFile(next, cfg);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, `# Codex ↔ Claude 작업 기록\n\n- 작업: ${prompt.slice(0, 500)}\n- 시작: ${now()}\n\n## Codex 기획 (${plan.sec.toFixed(0)}초)\n\n${plan.body}\n`);
+  saveState(next);
+  giveContext(
+    '[Codex 기획] 이 작업의 기획·설계는 Codex 가 맡았고 너(Claude Code)는 구현 담당이다. 아래가 Codex 의 계획이다.\n' +
+    (cfg.planApproval
+      ? '먼저 계획을 사장님께 5줄 이내로 요약해 보여주고 "이대로 진행할까요?" 라고 물은 뒤 멈춰라. 승인 전에는 코드를 고치지 마라.\n'
+      : '먼저 계획을 사장님께 3~5줄로 요약해 보여주고, 바로 이 계획대로 구현하라.\n') +
+    '계획이 틀렸다는 확실한 근거(코드·테스트)가 있을 때만 다르게 하고, 그 이유를 답변에 적어라. 구현이 끝나면 Codex 가 이 계획의 완료 기준으로 검토한다.\n' +
+    `기록 파일: ${next.file}\n\n${plan.body}`);
 }
 
 async function onStop(input) {
@@ -311,6 +399,7 @@ async function onStop(input) {
   const timing = `총 ${((Date.now() - t0) / 1000).toFixed(0)}초 (테스트 ${tests.sec.toFixed(0)}초, Codex ${review.sec.toFixed(0)}초, ${cfg.parallelTests ? '동시 실행' : '순서대로'})`;
 
   appendRound(state, cfg, { verdict, body, tests, files, tier, timing });
+  state.planPending = false; // 계획이 구현돼서 검토까지 됨
   state.lastHash = hash;
 
   if (verdict === 'FAIL' && (state.fixRounds || 0) < cfg.maxFixRounds) {
@@ -321,7 +410,8 @@ async function onStop(input) {
     saveState(state);
     process.stderr.write(
       `🔍 Codex 교차 검증 ${state.fixRounds}회차: FAIL — 재수정 ${state.fixRounds}/${cfg.maxFixRounds}\n\n${body}\n\n` +
-      '각 지적을 고쳐라. 지적이 틀렸다고 판단되면 고치지 말고 근거(테스트 출력, 파일:줄)를 대고 반박을 답변에 써라.\n' +
+      '위는 Codex(기획·검토 담당)의 반박과 수정 제안이다. 너(구현 담당)는 제안대로 수정하라.\n' +
+      '제안이 틀렸다는 확실한 근거(테스트 출력, 파일:줄)가 있을 때만 고치지 말고 그 근거를 답변에 써라 — Codex 가 다음 회차에 다시 판단한다.\n' +
       '지적과 상관없는 코드는 건드리지 마라. 끝나고 멈추면 자동으로 다시 검증된다.\n');
     return 2;
   }
@@ -341,7 +431,13 @@ if (require.main === module) {
   const mode = process.argv[2];
   const input = readInput();
   try {
-    if (mode === 'prompt') { onPrompt(input); process.exit(0); }
+    if (mode === 'prompt') {
+      onPrompt(input).then(() => process.exit(0)).catch((e) => {
+        process.stderr.write(`cross-review 기획 오류(건너뜀): ${e.message}\n`);
+        process.exit(0);
+      });
+      return;
+    }
     if (mode === 'stop') {
       onStop(input).then((code) => process.exit(code)).catch((e) => {
         process.stderr.write(`cross-review 오류(검증 건너뜀): ${e.message}\n`);
@@ -356,4 +452,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { buildPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };
+module.exports = { buildPrompt, buildPlanPrompt, relevant, resolveReviewer, pickTier, withTierArgs, mergeTests, DEFAULTS };

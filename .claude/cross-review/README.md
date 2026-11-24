@@ -1,14 +1,23 @@
-# 교차 검증 키트 (Claude 수정 → Codex 검증)
+# Codex ↔ Claude 협업 키트
 
-Claude Code 가 코드를 고치고 멈출 때마다 **Codex(GPT)가 자동으로 검증**하고,
-FAIL 이면 Claude 가 고치거나 근거로 반박한다. 재수정은 최대 2번,
-그래도 남는 건 **사장님 체크리스트**로 `reviews/` 파일과 세션에 남는다.
+역할을 나눠서 **한 Claude Code 세션 안에서** 주고받는다. 단계 사이에 기다리는 틈은 없다.
+
+| 단계 | 담당 |
+|---|---|
+| 기획 · 설계 · 작업 계획(완료 기준 C1, C2 …) | **Codex** |
+| 구현 · 수정 | **Claude Code** |
+| 검토 · 반박 · 수정 제안 (자기 계획 기준) | **Codex** |
+| 다시 수정 | **Claude Code** |
+| 재수정 2번 후에도 남은 것 | **사장님 체크리스트** |
 
 ```
-Claude 수정 → (멈추는 순간) 테스트 실행 + Codex 검증
-   ├─ PASS ─────────────────────────────→ 체크리스트(위험 경로만) → 끝
-   └─ FAIL → Claude 재수정/반박 → 재검증 (최대 2번) → 남은 지적 = 체크리스트 → 끝
+사장님 요청 → Codex 기획 → Claude 구현 → Codex 검토(테스트와 동시에)
+   ├─ PASS ───────────────────────────────→ 체크리스트(위험 경로만) → 끝
+   └─ FAIL → Codex 수정 제안 → Claude 수정 → Codex 재검토 (최대 2번) → 남은 것 = 체크리스트
 ```
+
+Codex 는 매 회차에 **자기 계획 + 지난 지적 + Claude 의 답**을 전부 넘겨받아 같은 대화처럼 이어간다.
+기록은 `reviews/` 한 파일에 기획 → 회차별 검토 → 최종 정리 순으로 쌓인다.
 
 ## 설치 (프로젝트마다 한 번)
 
@@ -25,7 +34,7 @@ Claude 수정 → (멈추는 순간) 테스트 실행 + Codex 검증
 3. `.claude/settings.json` 의 `hooks` 에 추가
 
 ```json
-"UserPromptSubmit": [{ "hooks": [{ "type": "command",
+"UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 900,
   "command": "node \"$CLAUDE_PROJECT_DIR/.claude/cross-review/cross-review.js\" prompt" }] }],
 "Stop": [{ "hooks": [{ "type": "command", "timeout": 1200,
   "command": "node \"$CLAUDE_PROJECT_DIR/.claude/cross-review/cross-review.js\" stop" }] }]
@@ -39,6 +48,16 @@ Claude 수정 → (멈추는 순간) 테스트 실행 + Codex 검증
 ```
 
 5. Claude Code 를 새로 시작 (훅은 시작할 때 읽힘)
+
+## 기획 설정
+
+- `planning` (기본 `true`): 요청이 오면 Codex 가 먼저 저장소를 읽고 계획을 세워 Claude 에게 넘김.
+  질문·설명 요청처럼 코드 작업이 아니면 Codex 가 `PLAN: NONE` 으로 건너뜀
+- `planMinChars` (기본 20): 이보다 짧은 메시지("응", "진행해")는 기획하지 않고 하던 작업을 이어감
+- `planTier` (기본 `large`): 기획에 쓸 `modelTiers` 단계
+- `planApproval` (기본 `false`): `true` 면 Claude 가 계획을 보여주고 **사장님 승인 후** 구현. 코인·결제 프로젝트는 `true` 권장
+- `planTimeoutSec` (기본 600): 넘으면 기획 없이 진행하고 그 사실을 사장님께 알림 (NOT_PROVEN)
+- 훅 대기: 기획하는 동안(보통 1~5분) Claude 는 시작하지 않고 기다린다. UserPromptSubmit 훅 `timeout` 은 900 이상으로
 
 ## 속도 설정
 
